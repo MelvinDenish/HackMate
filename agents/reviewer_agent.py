@@ -32,7 +32,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from agents.llm_factory import create_llm, invoke_with_retry
 from config import PipelineConfig
 from pipeline.cost_tracker import CostTracker
-from tools.sandbox import DockerSandbox, SandboxResult
+from tools.sandbox import DockerSandbox, LocalSandbox, SandboxResult, create_sandbox
 from workspace.manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -209,6 +209,7 @@ def run_review(
     workspace: WorkspaceManager,
     config: PipelineConfig,
     cost_tracker: CostTracker = None,
+    prd_path: str = "",
 ) -> ReviewResult:
     """
     Review generated code using the 6-phase verification loop.
@@ -245,15 +246,11 @@ def run_review(
     project = _detect_project_type(src_dir)
     logger.info(f"[Reviewer] Detected project type: {project['type']}")
 
-    # Phase 2: Run in sandbox
-    sandbox = DockerSandbox(
-        image=config.sandbox.image,
-        timeout=config.sandbox.timeout,
-        memory_limit=config.sandbox.memory_limit,
-    )
+    # Phase 2: Run in sandbox (with Docker fallback)
+    sandbox = create_sandbox(config)
 
-    # Determine the right Docker image
-    if project["type"] == "node":
+    # Override image for Node projects if using Docker
+    if project["type"] == "node" and isinstance(sandbox, DockerSandbox):
         sandbox.image = "node:20-slim"
 
     sandbox_result = sandbox.execute_project(
@@ -284,10 +281,20 @@ def run_review(
     if static_issues:
         review_context += f"## Static Analysis Issues\n{static_issues}\n\n"
 
+    # Add PRD context so reviewer can verify spec compliance
+    if prd_path:
+        try:
+            prd_content = workspace.read_file(prd_path)
+            # Include key spec sections for verification
+            review_context += f"## PRD Specification (for compliance check)\n{prd_content[:6000]}\n\n"
+        except Exception:
+            pass
+
     review_context += (
         f"## Sandbox Execution Result\n{sandbox_result.summary}\n\n"
         f"## Full Source Code ({len(all_source_files)} files)\n{all_source_files}\n\n"
-        "Perform the 6-phase verification and provide your verdict."
+        "Perform the 6-phase verification and provide your verdict. "
+        "Also verify that the code implements the PRD specification correctly."
     )
 
     messages = [

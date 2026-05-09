@@ -34,6 +34,52 @@ MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 _MAX_RETRIES = 3
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 529}
 
+# Model context limits (input tokens) for pre-flight validation
+MODEL_CONTEXT_LIMITS = {
+    "claude-sonnet-4-20250514": 200_000,
+    "claude-haiku-3-5-20241022": 200_000,
+    "gemini-2.5-flash": 1_000_000,
+    "gemini-2.5-pro": 1_000_000,
+    "kimi-k2": 128_000,
+    "text-embedding-004": 3_000,
+}
+
+# Default timeouts per model tier (seconds)
+MODEL_TIMEOUTS = {
+    "claude-haiku-3-5-20241022": 60,
+    "claude-sonnet-4-20250514": 180,
+    "gemini-2.5-flash": 120,
+    "gemini-2.5-pro": 240,
+    "kimi-k2": 120,
+}
+
+
+def _estimate_tokens(messages: list) -> int:
+    """Rough token estimate: ~4 chars per token across providers."""
+    total_chars = 0
+    for m in messages:
+        content = m.content if hasattr(m, 'content') else str(m)
+        total_chars += len(content) if isinstance(content, str) else 0
+    return total_chars // 4
+
+
+def _check_context_budget(messages: list, spec) -> None:
+    """Pre-flight check: warn or raise if prompt exceeds model context."""
+    est_tokens = _estimate_tokens(messages)
+    limit = MODEL_CONTEXT_LIMITS.get(spec.model_name, 200_000)
+    ratio = est_tokens / limit if limit > 0 else 0
+
+    if ratio > 0.95:
+        logger.error(
+            f"[LLM] CONTEXT OVERFLOW: ~{est_tokens:,} tokens estimated, "
+            f"limit is {limit:,} for {spec.model_name}. Prompt will be truncated!"
+        )
+    elif ratio > 0.80:
+        logger.warning(
+            f"[LLM] Context usage HIGH: ~{est_tokens:,}/{limit:,} tokens "
+            f"({ratio:.0%}) for {spec.model_name}"
+        )
+
 
 def create_llm(spec: ModelSpec, keys: APIKeys) -> BaseChatModel:
     """
@@ -181,10 +227,23 @@ def invoke_with_retry(
         Exception: If all retries exhausted or non-transient error
     """
     last_error = None
+    timeout = MODEL_TIMEOUTS.get(spec.model_name, 180)
+
+    # Pre-flight: check if prompt fits the model context
+    _check_context_budget(messages, spec)
 
     for attempt in range(max_retries):
         try:
-            response = llm.invoke(messages)
+            # Timeout guard: use threading to prevent infinite hangs
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(llm.invoke, messages)
+                try:
+                    response = future.result(timeout=timeout)
+                except concurrent.futures.TimeoutError:
+                    raise TimeoutError(
+                        f"LLM call to {spec.model_name} timed out after {timeout}s"
+                    )
 
             # Track cost
             if cost_tracker is not None:

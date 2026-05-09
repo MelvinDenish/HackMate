@@ -20,6 +20,11 @@ from agents.llm_factory import create_llm, invoke_with_retry
 from config import PipelineConfig
 from workspace.manager import WorkspaceManager
 
+try:
+    from agents.knowledge_base import KnowledgeBase
+except ImportError:
+    KnowledgeBase = None
+
 logger = logging.getLogger(__name__)
 
 ARCHITECT_SYSTEM_PROMPT = """You are the Architect Agent in an autonomous hackathon pipeline. You produce a comprehensive Product Requirements Document (PRD) that fully specifies what the coding agents must build.
@@ -112,22 +117,49 @@ def run_architect(
     """
     logger.info("[Architect] Starting PRD generation")
 
-    # Read the dossier
-    dossier_content = workspace.read_file(dossier_path)
+    # Read the dossier (fail-forward: proceed without it if missing)
+    dossier_content = ""
+    try:
+        if dossier_path:
+            dossier_content = workspace.read_file(dossier_path)
+    except Exception as e:
+        logger.warning(f"[Architect] Dossier unavailable ({e}), proceeding with brief only")
+
+    # Query Knowledge Base for additional context (RAG)
+    kb_context = ""
+    try:
+        if KnowledgeBase is not None:
+            kb = KnowledgeBase(config)
+            kb_context = kb.get_context_for_prompt(
+                f"tech stack architecture for: {refined_brief[:500]}",
+                n_results=5,
+                max_chars=4000,
+            )
+            if kb_context and "No relevant context" not in kb_context:
+                logger.info(f"[Architect] KB returned context ({len(kb_context)} chars)")
+            else:
+                kb_context = ""
+    except Exception as e:
+        logger.warning(f"[Architect] KB query failed ({e}), continuing without RAG")
 
     # Create the LLM
     spec = config.get_model("architect")
     llm = create_llm(spec, config.keys)
 
+    prompt_parts = [f"## Refined Project Brief\n\n{refined_brief}\n\n"]
+    if dossier_content:
+        prompt_parts.append(f"## Market Research Dossier\n\n{dossier_content}\n\n")
+    if kb_context:
+        prompt_parts.append(f"## Knowledge Base Context (from research)\n\n{kb_context}\n\n")
+    prompt_parts.append(
+        "Generate a comprehensive Product Requirements Document (PRD) "
+        "that fully specifies the hackathon application. Be extremely "
+        "specific — the coding agents will build EXACTLY what you specify."
+    )
+
     messages = [
         SystemMessage(content=ARCHITECT_SYSTEM_PROMPT),
-        HumanMessage(content=(
-            f"## Refined Project Brief\n\n{refined_brief}\n\n"
-            f"## Market Research Dossier\n\n{dossier_content}\n\n"
-            "Generate a comprehensive Product Requirements Document (PRD) "
-            "that fully specifies the hackathon application. Be extremely "
-            "specific — the coding agents will build EXACTLY what you specify."
-        )),
+        HumanMessage(content="".join(prompt_parts)),
     ]
 
     response = invoke_with_retry(

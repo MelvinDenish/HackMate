@@ -4,6 +4,7 @@
 
 # --- Core Orchestration ---
 langgraph>=0.4.0
+langgraph-checkpoint-sqlite>=1.0.0   # Resume-on-crash checkpointing
 langchain>=0.3.0
 langchain-core>=0.3.0
 

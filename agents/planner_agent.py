@@ -61,7 +61,9 @@ Return a JSON array of task objects. Each task:
     "GET /api/health returns 200 with {status: ok}",
     "All imports resolve without errors"
   ],
-  "estimated_files": ["src/backend/server.js", "src/backend/routes/health.js"]
+  "estimated_files": ["src/backend/server.js", "src/backend/routes/health.js"],
+  "relevant_prd_sections": ["Tech Stack Specification", "API Contract", "Database Schema"],
+  "complexity": "low|medium|high"
 }
 ```
 
@@ -71,6 +73,8 @@ Rules:
 - Include exact file paths, exact function names, exact package imports
 - First task is ALWAYS project initialization (package.json / requirements.txt)
 - Last task is ALWAYS deployment configuration
+- For `relevant_prd_sections`: list ONLY the PRD section titles the coder needs for THIS task
+- For `complexity`: "low" = config/setup files, "medium" = standard CRUD/UI, "high" = algorithms/auth/AI
 - Return ONLY the JSON array — no explanation text"""
 
 
@@ -159,6 +163,8 @@ def run_planner(
             "dependencies": task.get("dependencies", []),
             "acceptance_criteria": task.get("acceptance_criteria", []),
             "estimated_files": task.get("estimated_files", []),
+            "relevant_prd_sections": task.get("relevant_prd_sections", []),
+            "complexity": task.get("complexity", "medium"),
             "status": "pending",
         }
         validated_tasks.append(validated)

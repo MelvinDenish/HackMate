@@ -87,6 +87,56 @@ Regenerate ALL affected files with the fixes applied. Use the same ```file:path`
 Fix ONLY the reported issues — do not refactor working code."""
 
 
+def _extract_prd_sections(prd_content: str, section_names: list[str]) -> str:
+    """Extract specific sections from the PRD by their heading names.
+    Falls back to full PRD (up to 12000 chars) if no sections matched."""
+    if not section_names:
+        return prd_content[:12000]
+
+    import re
+    extracted = []
+    # Split PRD by markdown headings (### N. Title)
+    sections = re.split(r'(?=^###?\s+\d*\.?\s*)', prd_content, flags=re.MULTILINE)
+
+    for section in sections:
+        for name in section_names:
+            if name.lower() in section[:200].lower():
+                extracted.append(section.strip())
+                break
+
+    if extracted:
+        return "\n\n".join(extracted)
+
+    # Fallback: no sections matched, return more of the PRD
+    return prd_content[:12000]
+
+
+def _get_dependency_file_contents(
+    task: dict, all_tasks: list[dict], workspace: WorkspaceManager, max_chars: int = 6000
+) -> str:
+    """Read the content of files created by dependency tasks."""
+    dep_ids = set(task.get("dependencies", []))
+    if not dep_ids:
+        return ""
+
+    dep_files = []
+    for t in all_tasks:
+        if t.get("id") in dep_ids and t.get("files_created"):
+            for fpath in t["files_created"]:
+                try:
+                    content = workspace.read_file(fpath)
+                    rel = fpath.split("src/")[-1] if "src/" in fpath else fpath.split("\\")[-1]
+                    dep_files.append(f"### {rel}\n```\n{content[:3000]}\n```")
+                except Exception:
+                    continue
+
+    if not dep_files:
+        return ""
+
+    result = "\n\n".join(dep_files)
+    return result[:max_chars]
+
+
 def execute_task(
     task: dict,
     prd_content: str,
@@ -95,6 +145,7 @@ def execute_task(
     config: PipelineConfig,
     revision_context: str = "",
     cost_tracker: CostTracker = None,
+    all_tasks: list[dict] = None,
 ) -> list[str]:
     """
     Execute a single task from the task queue.
@@ -107,18 +158,28 @@ def execute_task(
         config: Pipeline configuration
         revision_context: Optional revision instructions from reviewer
         cost_tracker: Optional cost tracker
+        all_tasks: All tasks (for reading dependency file contents)
 
     Returns:
         List of file paths created/modified
     """
     task_id = task.get("id", "unknown")
     task_title = task.get("title", "Unknown task")
-    logger.info(f"[Coder] Executing task {task_id}: {task_title}")
+    complexity = task.get("complexity", "medium")
+    logger.info(f"[Coder] Executing task {task_id}: {task_title} (complexity: {complexity})")
 
-    spec = config.get_model("coder")
+    # Adaptive model routing: low complexity → Haiku, high → Sonnet
+    if complexity == "low":
+        spec = config.get_model("deslopify")  # Haiku — fast + cheap for simple tasks
+        logger.info(f"[Coder] Using Haiku for low-complexity task {task_id}")
+    else:
+        spec = config.get_model("coder")  # Sonnet — full power for medium/high
     llm = create_llm(spec, config.keys)
 
-    # Build the prompt
+    # Build the prompt with TARGETED PRD sections (not truncated)
+    relevant_sections = task.get("relevant_prd_sections", [])
+    prd_context = _extract_prd_sections(prd_content, relevant_sections)
+
     task_spec = (
         f"## Task: {task_title}\n"
         f"**ID**: {task_id}\n"
@@ -136,9 +197,15 @@ def execute_task(
 
     context = (
         f"## Current Project Structure\n```\n{src_tree}\n```\n\n"
-        f"## PRD (Reference)\n{prd_content[:6000]}\n\n"
+        f"## PRD (Relevant Sections)\n{prd_context}\n\n"
         f"## Your Task\n{task_spec}"
     )
+
+    # Add dependency file contents so coder can reference previously created code
+    if all_tasks:
+        dep_content = _get_dependency_file_contents(task, all_tasks, workspace)
+        if dep_content:
+            context += f"\n\n## Previously Generated Files (from dependency tasks)\n{dep_content}"
 
     if revision_context:
         context += f"\n\n## REVISION REQUIRED\n{revision_context}"
@@ -224,7 +291,7 @@ def execute_all_tasks(
     """
     Execute all tasks using DAG-layer parallelism.
 
-    Independent tasks run concurrently within each layer.
+    Independent tasks run concurrently within each layer via asyncio.
     Layers execute sequentially (respecting dependencies).
 
     Args:
@@ -261,22 +328,32 @@ def execute_all_tasks(
             files = execute_task(
                 task, prd_content, src_tree, workspace, config,
                 cost_tracker=cost_tracker,
+                all_tasks=sorted_tasks,
             )
             all_files.extend(files)
             task["status"] = "completed"
             task["files_created"] = files
         else:
-            # Multiple independent tasks — execute sequentially
-            # (True async would need separate LLM clients; sequential is safe)
-            for task in layer:
-                src_tree = workspace.get_src_tree()
-                files = execute_task(
-                    task, prd_content, src_tree, workspace, config,
-                    cost_tracker=cost_tracker,
-                )
-                all_files.extend(files)
-                task["status"] = "completed"
-                task["files_created"] = files
+            # Multiple independent tasks — execute with asyncio parallelism
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Already in an async context, run sequentially
+                    _execute_layer_sequential(
+                        layer, prd_content, workspace, config,
+                        cost_tracker, sorted_tasks, all_files,
+                    )
+                else:
+                    asyncio.run(_execute_layer_parallel(
+                        layer, prd_content, workspace, config,
+                        cost_tracker, sorted_tasks, all_files,
+                    ))
+            except RuntimeError:
+                # No event loop, create one
+                asyncio.run(_execute_layer_parallel(
+                    layer, prd_content, workspace, config,
+                    cost_tracker, sorted_tasks, all_files,
+                ))
 
         # Log layer completion
         for task in layer:
@@ -287,3 +364,49 @@ def execute_all_tasks(
             )
 
     return all_files
+
+
+async def _execute_layer_parallel(
+    layer: list[dict],
+    prd_content: str,
+    workspace: WorkspaceManager,
+    config: PipelineConfig,
+    cost_tracker: CostTracker,
+    all_tasks: list[dict],
+    all_files: list[str],
+):
+    """Execute independent tasks in parallel using asyncio.to_thread."""
+    async def _run_task(task):
+        src_tree = workspace.get_src_tree()
+        return await asyncio.to_thread(
+            execute_task, task, prd_content, src_tree, workspace, config,
+            "", cost_tracker, all_tasks,
+        )
+
+    results = await asyncio.gather(*[_run_task(t) for t in layer])
+    for task, files in zip(layer, results):
+        all_files.extend(files)
+        task["status"] = "completed"
+        task["files_created"] = files
+
+
+def _execute_layer_sequential(
+    layer: list[dict],
+    prd_content: str,
+    workspace: WorkspaceManager,
+    config: PipelineConfig,
+    cost_tracker: CostTracker,
+    all_tasks: list[dict],
+    all_files: list[str],
+):
+    """Fallback: execute tasks sequentially when async isn't available."""
+    for task in layer:
+        src_tree = workspace.get_src_tree()
+        files = execute_task(
+            task, prd_content, src_tree, workspace, config,
+            cost_tracker=cost_tracker,
+            all_tasks=all_tasks,
+        )
+        all_files.extend(files)
+        task["status"] = "completed"
+        task["files_created"] = files

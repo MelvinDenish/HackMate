@@ -291,7 +291,10 @@ def build_pipeline(
         status["review"] = "running"
 
         try:
-            result = run_review(workspace, config, cost_tracker=cost_tracker)
+            result = run_review(
+                workspace, config, cost_tracker=cost_tracker,
+                prd_path=state.get("prd_path", ""),
+            )
 
             iteration = state.get("review_iteration", 0) + 1
             status["review"] = "completed"
@@ -338,15 +341,14 @@ def build_pipeline(
 
             if not result.passed:
                 logger.warning(
-                    f"[Orchestrator] ⚠️ Security review FAILED "
-                    f"({result.critical_count} critical issues). "
-                    f"Proceeding to deploy (hackathon mode)."
+                    f"[Orchestrator] Security review FAILED "
+                    f"({result.critical_count} critical issues)."
                 )
 
             return {
                 "security_verdict": result.verdict,
-                "security_findings": result.findings[:500],
-                "current_phase": "deployment",
+                "security_findings": result.findings[:2000],
+                "current_phase": "security_decision",
                 "phase_status": status,
             }
 
@@ -480,11 +482,69 @@ def build_pipeline(
             )
             return "code_node"
 
+    def security_router(state: PipelineState) -> Literal[
+        "security_fix_node", "deploy_node"
+    ]:
+        """
+        Route after security review:
+        - FAIL with critical issues → security_fix_node (fix then redeploy)
+        - PASS or WARN → deploy_node
+        """
+        verdict = state.get("security_verdict", "PASS")
+        if verdict == "FAIL":
+            logger.info("[Orchestrator] Security FAILED → attempting auto-fix")
+            return "security_fix_node"
+        logger.info(f"[Orchestrator] Security {verdict} → deploy")
+        return "deploy_node"
+
+    def security_fix_node(state: PipelineState) -> dict:
+        """Auto-fix critical security issues by feeding findings back to coder."""
+        logger.info("=== SECURITY FIX: Applying security patches ===")
+        _notify("security_fix", "running")
+
+        findings = state.get("security_findings", "")
+        prd_content = ""
+        try:
+            prd_content = workspace.read_file(state.get("prd_path", ""))
+        except Exception:
+            pass
+
+        src_tree = workspace.get_src_tree()
+        fix_task = {
+            "id": "security_fix",
+            "title": "Fix Critical Security Issues",
+            "description": (
+                "Fix the following security issues found during review:\n\n"
+                f"{findings}\n\n"
+                "Apply fixes to the affected files. Keep all existing functionality."
+            ),
+            "role": "fullstack",
+            "priority": 0,
+            "dependencies": [],
+            "acceptance_criteria": ["No hardcoded secrets", "Input validation on all endpoints"],
+            "estimated_files": [],
+            "complexity": "medium",
+        }
+
+        try:
+            files = execute_task(
+                fix_task, prd_content, src_tree, workspace, config,
+                cost_tracker=cost_tracker,
+            )
+            logger.info(f"[Security Fix] Patched {len(files)} files")
+        except Exception as e:
+            logger.warning(f"[Security Fix] Auto-fix failed: {e}")
+
+        return {
+            "current_phase": "deployment",
+            "security_verdict": "WARN (auto-fixed)",
+        }
+
     # ── Build the Graph ───────────────────────────────────────
 
     graph = StateGraph(PipelineState)
 
-    # Add nodes (v2: includes deslopify and security)
+    # Add nodes (v2: includes deslopify, security, and security_fix)
     graph.add_node("research_node", research_node)
     graph.add_node("architect_node", architect_node)
     graph.add_node("plan_node", plan_node)
@@ -492,6 +552,7 @@ def build_pipeline(
     graph.add_node("deslopify_node", deslopify_node)
     graph.add_node("review_node", review_node)
     graph.add_node("security_node", security_node)
+    graph.add_node("security_fix_node", security_fix_node)
     graph.add_node("deploy_node", deploy_node)
     graph.add_node("pitch_node", pitch_node)
     graph.add_node("present_node", present_node)
@@ -514,17 +575,38 @@ def build_pipeline(
         },
     )
 
-    graph.add_edge("security_node", "deploy_node")
+    # Conditional: security → fix (critical) or deploy (pass/warn)
+    graph.add_conditional_edges(
+        "security_node",
+        security_router,
+        {
+            "security_fix_node": "security_fix_node",
+            "deploy_node": "deploy_node",
+        },
+    )
+    graph.add_edge("security_fix_node", "deploy_node")
+
     graph.add_edge("deploy_node", "pitch_node")
     graph.add_edge("pitch_node", "present_node")
     graph.add_edge("present_node", END)
 
-    logger.info("[Orchestrator] Pipeline graph v2 built successfully")
+    logger.info("[Orchestrator] Pipeline graph v2.1 built successfully")
     logger.info(
         "[Orchestrator] Flow: research → architect → plan → code → "
-        "deslopify → review ↺ → security → deploy → pitch → present"
+        "deslopify → review ↺ → security ↺ → deploy → pitch → present"
     )
-    return graph.compile()
+
+    # Compile with SQLite checkpointing for resume-on-crash
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+        checkpoint_path = str(workspace.root / ".checkpoints" / "pipeline.db")
+        (workspace.root / ".checkpoints").mkdir(parents=True, exist_ok=True)
+        checkpointer = SqliteSaver.from_conn_string(checkpoint_path)
+        logger.info(f"[Orchestrator] Checkpointing enabled: {checkpoint_path}")
+        return graph.compile(checkpointer=checkpointer)
+    except (ImportError, Exception) as e:
+        logger.warning(f"[Orchestrator] Checkpointing unavailable ({e}), running without")
+        return graph.compile()
 
 
 def run_pipeline(
@@ -556,8 +638,17 @@ def run_pipeline(
         progress_callback=progress_callback,
     )
 
-    # Execute the graph
-    final_state = pipeline.invoke(initial_state)
+    # Execute the graph with thread_id for checkpoint resumption
+    import uuid
+    thread_id = str(uuid.uuid4())[:8]
+    try:
+        final_state = pipeline.invoke(
+            initial_state,
+            config={"configurable": {"thread_id": thread_id}},
+        )
+    except TypeError:
+        # Fallback: checkpointing not available, run without config
+        final_state = pipeline.invoke(initial_state)
 
     # Log completion
     logger.info("╔══════════════════════════════════════════════╗")

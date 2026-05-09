@@ -90,45 +90,59 @@ def run_deslopify(
     if not source_files:
         return {"files_cleaned": 0, "skipped": True}
 
-    # Build context
-    files_context = ""
-    for rel_path, content in source_files.items():
-        files_context += f"\n### {rel_path}\n```\n{content}\n```\n\n"
-
     spec = config.get_model("deslopify")
     llm = create_llm(spec, config.keys)
 
-    prompt = (
-        f"## Source Code to Clean\n"
-        f"Review the following {len(source_files)} files and apply cleanup rules.\n"
-        f"{files_context}"
-    )
+    # Batch files into groups of 5 for better cleanup quality
+    file_items = list(source_files.items())
+    batch_size = 5
+    total_cleaned = 0
 
-    messages = [
-        SystemMessage(content=DESLOPIFY_SYSTEM_PROMPT),
-        HumanMessage(content=prompt),
-    ]
+    for batch_start in range(0, len(file_items), batch_size):
+        batch = file_items[batch_start:batch_start + batch_size]
+        batch_num = (batch_start // batch_size) + 1
+        total_batches = (len(file_items) + batch_size - 1) // batch_size
 
-    response = invoke_with_retry(
-        llm, messages,
-        spec=spec,
-        agent_name="deslopify",
-        phase="coding",
-        cost_tracker=cost_tracker,
-    )
-    raw_output = response.content
+        logger.info(
+            f"[De-Sloppify] Batch {batch_num}/{total_batches}: "
+            f"{len(batch)} files"
+        )
 
-    # Parse cleaned files and overwrite
-    cleaned_count = _apply_cleaned_files(raw_output, workspace)
+        files_context = ""
+        for rel_path, content in batch:
+            files_context += f"\n### {rel_path}\n```\n{content}\n```\n\n"
+
+        prompt = (
+            f"## Source Code to Clean\n"
+            f"Review the following {len(batch)} files and apply cleanup rules.\n"
+            f"{files_context}"
+        )
+
+        messages = [
+            SystemMessage(content=DESLOPIFY_SYSTEM_PROMPT),
+            HumanMessage(content=prompt),
+        ]
+
+        response = invoke_with_retry(
+            llm, messages,
+            spec=spec,
+            agent_name="deslopify",
+            phase="coding",
+            cost_tracker=cost_tracker,
+        )
+
+        # Parse cleaned files and overwrite
+        cleaned_count = _apply_cleaned_files(response.content, workspace)
+        total_cleaned += cleaned_count
 
     workspace.log_event(
         "deslopify",
-        f"Cleanup complete: {cleaned_count} files cleaned",
-        f"Total source files: {len(source_files)}",
+        f"Cleanup complete: {total_cleaned} files cleaned",
+        f"Total source files: {len(source_files)} ({total_batches} batches)",
     )
 
-    logger.info(f"[De-Sloppify] Cleaned {cleaned_count}/{len(source_files)} files")
-    return {"files_cleaned": cleaned_count, "total_files": len(source_files)}
+    logger.info(f"[De-Sloppify] Cleaned {total_cleaned}/{len(source_files)} files")
+    return {"files_cleaned": total_cleaned, "total_files": len(source_files)}
 
 
 def _read_all_sources(
