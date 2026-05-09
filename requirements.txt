@@ -1,0 +1,45 @@
+# ============================================================
+# Hackathon Automation Pipeline v2 — Dependencies
+# ============================================================
+
+# --- Core Orchestration ---
+langgraph>=0.4.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+
+# --- LLM Providers (Multi-Provider Strategy) ---
+langchain-anthropic>=0.3.0          # Claude Sonnet 4, Haiku 3.5
+langchain-google-genai>=2.0.0       # Gemini 2.5 Flash/Pro
+langchain-openai>=0.3.0             # Kimi k2 (OpenAI-compatible API)
+
+# --- Vector Store & RAG ---
+chromadb>=0.5.0
+langchain-chroma>=0.2.0
+
+# --- Web Search & Scraping ---
+duckduckgo-search>=7.0.0            # Free fallback search
+beautifulsoup4>=4.12.0
+httpx>=0.28.0
+requests>=2.31.0                    # For Exa and Firecrawl API clients
+
+# --- Docker Sandboxing ---
+docker>=7.0.0
+
+# --- Presentation (Gamma API) ---
+# Uses httpx (already listed above)
+
+# --- Deployment (Railway) ---
+# Uses httpx for Railway API calls
+
+# --- Configuration ---
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# --- CLI & Output ---
+rich>=13.0.0
+typer>=0.15.0
+
+# --- Utilities ---
+tenacity>=9.0.0                     # Retry logic for API calls
+jinja2>=3.1.0                       # Template rendering

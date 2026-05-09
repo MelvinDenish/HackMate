@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.env.local
+
+# Workspace (generated artifacts)
+workspace/src/
+workspace/output/
+workspace/logs/
+workspace/.chromadb/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.tar.gz
+
+# Validation cache
+*.pyc
