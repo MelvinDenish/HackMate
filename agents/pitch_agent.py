@@ -129,21 +129,57 @@ def run_pitch(
     """
     logger.info("[Pitch] Generating pitch narrative")
 
-    # Read source documents
-    dossier = workspace.read_file(dossier_path)
-    prd = workspace.read_file(prd_path)
+    # Read source documents (fail-forward: proceed with whatever is available)
+    dossier = ""
+    try:
+        if dossier_path:
+            dossier = workspace.read_file(dossier_path)
+    except Exception as e:
+        logger.warning(f"[Pitch] Dossier unavailable ({e}), proceeding without")
+
+    prd = ""
+    try:
+        if prd_path:
+            prd = workspace.read_file(prd_path)
+    except Exception as e:
+        logger.warning(f"[Pitch] PRD unavailable ({e}), proceeding without")
+
+    # Query Knowledge Base for market data (TAM, competitors, trends)
+    kb_context = ""
+    try:
+        from agents.knowledge_base import KnowledgeBase
+        kb = KnowledgeBase(config)
+        kb_context = kb.get_context_for_prompt(
+            "market size TAM SAM competitors business model revenue",
+            n_results=5,
+            max_chars=3000,
+        )
+        if kb_context and "No relevant context" not in kb_context:
+            logger.info(f"[Pitch] KB returned market context ({len(kb_context)} chars)")
+        else:
+            kb_context = ""
+    except Exception as e:
+        logger.warning(f"[Pitch] KB query failed ({e}), continuing without")
 
     spec = config.get_model("pitch")
     llm = create_llm(spec, config.keys)
 
+    # Build rich context with ALL available information
+    prompt_parts = []
+    if dossier:
+        prompt_parts.append(f"## Market Research Dossier\n\n{dossier}\n\n")
+    if kb_context:
+        prompt_parts.append(f"## Additional Market Data (from Knowledge Base)\n\n{kb_context}\n\n")
+    if prd:
+        prompt_parts.append(f"## Product Requirements Document\n\n{prd}\n\n")
+    prompt_parts.append(
+        f"## Live Demo URL\n{deployment_url or '(deployment pending)'}\n\n"
+        "Create the 7-slide pitch deck content. Return ONLY valid JSON."
+    )
+
     messages = [
         SystemMessage(content=PITCH_SYSTEM_PROMPT),
-        HumanMessage(content=(
-            f"## Market Research Dossier\n\n{dossier}\n\n"
-            f"## Product Requirements Document\n\n{prd[:4000]}\n\n"
-            f"## Live Demo URL\n{deployment_url or '(deployment pending)'}\n\n"
-            "Create the 7-slide pitch deck content. Return ONLY valid JSON."
-        )),
+        HumanMessage(content="".join(prompt_parts)),
     ]
 
     response = invoke_with_retry(

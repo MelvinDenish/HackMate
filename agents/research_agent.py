@@ -158,13 +158,17 @@ def run_research(
 
             # Use Firecrawl for deep page scraping if available
             if config.keys.firecrawl:
-                from tools.exa_search import FirecrawlScraper
-                scraper = FirecrawlScraper(api_key=config.keys.firecrawl)
+                from tools.exa_search import FirecrawlSearch
+                scraper = FirecrawlSearch(api_key=config.keys.firecrawl)
                 top_urls = [r["url"] for r in all_search_results[:5] if r.get("url")]
                 for url in top_urls:
-                    page = scraper.scrape(url)
-                    if page.get("success"):
-                        all_fetched_pages.append(page)
+                    page_md = scraper.scrape(url)
+                    if page_md:  # scrape() returns a string, not dict
+                        all_fetched_pages.append({
+                            "title": url.split("/")[-1],
+                            "url": url,
+                            "content": page_md[:5000],
+                        })
                 logger.info(f"[Research] Firecrawl scraped {len(all_fetched_pages)} pages")
         except Exception as e:
             logger.warning(f"[Research] Exa/Firecrawl failed, falling back to DuckDuckGo: {e}")
@@ -200,11 +204,13 @@ def run_research(
     # Step 3: Format research data for the LLM
     research_context = "## Web Search Results\n\n"
     for i, r in enumerate(unique_results[:20], 1):
+        # Handle both Exa (text) and DuckDuckGo (snippet) result formats
+        snippet = r.get('snippet', r.get('text', ''))[:500]
         research_context += (
             f"### Result {i}\n"
-            f"- **Title**: {r['title']}\n"
-            f"- **URL**: {r['url']}\n"
-            f"- **Snippet**: {r['snippet']}\n\n"
+            f"- **Title**: {r.get('title', 'N/A')}\n"
+            f"- **URL**: {r.get('url', 'N/A')}\n"
+            f"- **Snippet**: {snippet}\n\n"
         )
 
     research_context += "\n## Fetched Page Contents\n\n"

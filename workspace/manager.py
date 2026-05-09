@@ -192,8 +192,10 @@ class WorkspaceManager:
         return "\n".join(lines) if lines else "(empty)"
 
     def log_event(self, phase: str, event: str, details: str = "") -> None:
-        """Log a pipeline event to the workspace logs."""
+        """Log a pipeline event to the workspace logs (both flat text and JSONL)."""
         timestamp = datetime.now(timezone.utc).isoformat()
+
+        # Flat text log (human readable)
         log_line = f"[{timestamp}] [{phase.upper()}] {event}"
         if details:
             log_line += f"\n  {details}"
@@ -202,6 +204,17 @@ class WorkspaceManager:
         log_file = self.logs_dir / "pipeline.log"
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(log_line)
+
+        # JSONL structured log (machine parseable for dashboards/analytics)
+        jsonl_record = {
+            "ts": timestamp,
+            "phase": phase,
+            "event": event,
+            "details": details,
+        }
+        jsonl_file = self.logs_dir / "pipeline_events.jsonl"
+        with open(jsonl_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(jsonl_record, ensure_ascii=False) + "\n")
 
     def get_context_for_agent(self, agent_role: str) -> dict[str, str]:
         """

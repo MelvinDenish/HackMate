@@ -30,6 +30,7 @@
 """
 
 import logging
+from pathlib import Path
 from typing import Literal
 
 from langgraph.graph import StateGraph, END
@@ -145,7 +146,10 @@ def build_pipeline(
             dossier_path = state.get("dossier_path", "")
 
             if not dossier_path:
-                raise ValueError("No dossier available — research may have failed")
+                logger.warning(
+                    "[Orchestrator] No dossier available — architect will proceed "
+                    "with refined brief only (fail-forward)"
+                )
 
             prd_path = run_architect(
                 refined_brief, dossier_path, workspace, config,
@@ -220,7 +224,7 @@ def build_pipeline(
                     cost_tracker=cost_tracker,
                 )
             else:
-                # Revision pass: fix failing tasks based on review
+                # Revision pass: fix ONLY tasks relevant to the review feedback
                 test_results = state.get("test_results", {})
                 review_notes = test_results.get("notes", "")
                 fix_instructions = test_results.get("fix_instructions", "")
@@ -233,16 +237,46 @@ def build_pipeline(
                     f"## Fix Instructions\n{fix_instructions}"
                 )
 
-                # Re-execute with revision context
-                code_files = []
+                # Identify which tasks need re-execution based on review feedback
+                # Match tasks whose files or titles appear in the fix instructions
+                tasks_to_fix = []
                 for task in tasks:
-                    if task.get("status") != "completed":
-                        files = execute_task(
-                            task, prd_content, src_tree,
-                            workspace, config, revision_context,
-                            cost_tracker=cost_tracker,
-                        )
-                        code_files.extend(files)
+                    task_files = task.get("files_created", [])
+                    task_title = task.get("title", "").lower()
+
+                    # Check if any of this task's files are mentioned in fix feedback
+                    file_mentioned = any(
+                        Path(f).name.lower() in fix_instructions.lower()
+                        for f in task_files if f
+                    )
+                    title_mentioned = task_title and task_title in fix_instructions.lower()
+
+                    if file_mentioned or title_mentioned:
+                        tasks_to_fix.append(task)
+
+                # Fallback: if we couldn't match specific tasks, re-do all incomplete
+                if not tasks_to_fix:
+                    tasks_to_fix = [
+                        t for t in tasks if t.get("status") != "completed"
+                    ]
+                    if not tasks_to_fix:
+                        tasks_to_fix = tasks  # Last resort
+
+                logger.info(
+                    f"[Orchestrator] Revision: re-executing {len(tasks_to_fix)}/{len(tasks)} tasks"
+                )
+
+                # Re-execute targeted tasks with revision context
+                code_files = []
+                for task in tasks_to_fix:
+                    task["status"] = "pending"  # Reset for re-execution
+                    files = execute_task(
+                        task, prd_content, src_tree,
+                        workspace, config, revision_context,
+                        cost_tracker=cost_tracker,
+                        all_tasks=tasks,
+                    )
+                    code_files.extend(files)
 
             status["coding"] = "completed"
             return {
@@ -395,6 +429,7 @@ def build_pipeline(
     def pitch_node(state: PipelineState) -> dict:
         """Phase 4a: Pitch Content — Claude Sonnet 4"""
         logger.info("═══ PHASE 4a: PITCH NARRATIVE ═══")
+        _notify("pitch", "running")
         status = dict(state.get("phase_status", {}))
         status["pitch"] = "running"
 

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -102,22 +103,26 @@ class CostTracker:
     def __init__(self, budget_limit: float = 10.00):
         self.budget_limit = budget_limit
         self._records: list[CostRecord] = []
+        self._lock = threading.Lock()
 
     def record(self, rec: CostRecord) -> None:
         """Record a cost entry. Raises BudgetExceededError if over limit."""
-        self._records.append(rec)
+        with self._lock:
+            self._records.append(rec)
+            total = sum(r.cost_usd for r in self._records)
         logger.info(
             f"[Cost] {rec.agent}/{rec.phase}: "
             f"{rec.input_tokens}in/{rec.output_tokens}out "
             f"= ${rec.cost_usd:.4f} "
-            f"(total: ${self.total_cost:.4f}/{self.budget_limit:.2f})"
+            f"(total: ${total:.4f}/{self.budget_limit:.2f})"
         )
-        if self.total_cost > self.budget_limit:
-            raise BudgetExceededError(self.total_cost, self.budget_limit)
+        if total > self.budget_limit:
+            raise BudgetExceededError(total, self.budget_limit)
 
     @property
     def total_cost(self) -> float:
-        return sum(r.cost_usd for r in self._records)
+        with self._lock:
+            return sum(r.cost_usd for r in self._records)
 
     @property
     def total_input_tokens(self) -> int:

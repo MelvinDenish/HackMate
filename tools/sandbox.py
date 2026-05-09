@@ -105,6 +105,7 @@ class DockerSandbox:
     def execute_code(self, code: str, language="python",
                      filename="main.py", install_deps=None) -> SandboxResult:
         start = time.time()
+        container = None
         try:
             self.ensure_image()
             cmds = []
@@ -135,7 +136,6 @@ class DockerSandbox:
             exit_code = result.get("StatusCode", -1)
             stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
-            container.remove(force=True)
             return SandboxResult(
                 success=(exit_code == 0), exit_code=exit_code,
                 stdout=stdout, stderr=stderr,
@@ -152,6 +152,12 @@ class DockerSandbox:
                 duration_ms=int((time.time() - start) * 1000),
                 error=f"Sandbox error: {e}",
             )
+        finally:
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except Exception:
+                    pass
 
     def execute_project(self, src_dir: Path, entry_command: str,
                         install_command: Optional[str] = None) -> SandboxResult:

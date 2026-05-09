@@ -163,9 +163,10 @@ def _detect_project_type(src_dir: Path) -> dict:
 
 
 def _static_checks(src_dir: Path) -> str:
-    """Run static checks before sandbox (import verification, syntax)."""
+    """Run static checks before sandbox (syntax validation + local import verification)."""
     findings = []
 
+    # Phase 1: Syntax check all Python files
     for fp in sorted(src_dir.rglob("*.py")):
         try:
             content = fp.read_text(encoding="utf-8")
@@ -174,31 +175,41 @@ def _static_checks(src_dir: Path) -> str:
             rel = fp.relative_to(src_dir)
             findings.append(f"[SYNTAX ERROR] {rel}: Line {e.lineno}: {e.msg}")
 
-    # Check for obvious import issues in Python files
+    # Phase 2: Verify local (relative) imports resolve to actual files
+    # Only flags imports between project files, never third-party packages
+    local_py_files = {
+        fp.stem for fp in src_dir.rglob("*.py")
+    }
+    local_packages = {
+        fp.parent.name for fp in src_dir.rglob("__init__.py")
+    }
+
     for fp in sorted(src_dir.rglob("*.py")):
         try:
             content = fp.read_text(encoding="utf-8")
-            imports = re.findall(r'^(?:from|import)\s+(\S+)', content, re.MULTILINE)
             rel = fp.relative_to(src_dir)
-            for imp in imports:
-                module = imp.split(".")[0]
-                # Flag imports from non-existent local modules
-                if not module.startswith("_") and module not in {
-                    "os", "sys", "json", "re", "time", "pathlib", "datetime",
-                    "typing", "logging", "asyncio", "math", "random", "hashlib",
-                    "collections", "functools", "itertools", "dataclasses",
-                    "abc", "enum", "io", "copy", "uuid", "base64", "urllib",
-                    "http", "socket", "subprocess", "shutil", "glob",
-                    # Common packages
-                    "flask", "django", "fastapi", "express", "react",
-                    "sqlalchemy", "requests", "numpy", "pandas",
-                    "pydantic", "pytest", "click", "rich",
-                }:
-                    # Check if it's a local module
-                    local_module = src_dir / f"{module}.py"
-                    local_package = src_dir / module / "__init__.py"
-                    if not local_module.exists() and not local_package.exists():
-                        pass  # Don't flag — too many false positives with 3rd party
+
+            # Check `from X import ...` where X looks like a local module
+            for match in re.finditer(r'^from\s+(\w+)\s+import', content, re.MULTILINE):
+                module = match.group(1)
+                # Only flag if it looks local (exists in our file set but file is missing)
+                if module in local_packages:
+                    pkg_dir = src_dir / module
+                    if not pkg_dir.is_dir():
+                        findings.append(
+                            f"[IMPORT] {rel}: imports from '{module}' but package dir missing"
+                        )
+        except Exception:
+            continue
+
+    # Phase 3: Check for common JS/TS issues
+    for fp in sorted(src_dir.rglob("*.js")):
+        try:
+            content = fp.read_text(encoding="utf-8")
+            # Check for obvious syntax: unmatched braces
+            if content.count("{") != content.count("}"):
+                rel = fp.relative_to(src_dir)
+                findings.append(f"[JS WARN] {rel}: mismatched braces ({{={content.count('{')}, }}={content.count('}')})")
         except Exception:
             continue
 
