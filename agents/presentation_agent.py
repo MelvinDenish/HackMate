@@ -156,29 +156,108 @@ def run_presentation(
 def _generate_markdown_fallback(pitch_data: dict,
                                  workspace: WorkspaceManager) -> dict:
     """
-    Fallback: generate a Markdown-based presentation file
+    Fallback: generate a self-contained Reveal.js HTML presentation
     when Gamma API key is not available.
+    Opens in any browser as a real slide deck.
     """
-    logger.info("[Presentation] Generating markdown fallback deck")
+    logger.info("[Presentation] Generating Reveal.js HTML fallback deck")
 
-    slides_md = [f"---\ntitle: {pitch_data.get('title', 'Pitch')}\n---\n"]
+    title = pitch_data.get('title', 'Hackathon Pitch')
+    subtitle = pitch_data.get('subtitle', '')
+    slides = pitch_data.get("slides", [])
 
-    for slide in pitch_data.get("slides", []):
+    # Build individual slide HTML
+    slides_html = []
+
+    # Title slide
+    slides_html.append(f"""
+      <section data-background-gradient="linear-gradient(135deg, #667eea 0%, #764ba2 100%)">
+        <h1 style="font-size:2.5em;text-shadow:2px 2px 10px rgba(0,0,0,0.3)">{title}</h1>
+        <p style="font-size:1.3em;opacity:0.9">{subtitle}</p>
+      </section>""")
+
+    # Content slides
+    for slide in slides:
+        headline = slide.get('headline', slide.get('title', ''))
+        body = slide.get('body', '').replace('\n', '<br>')
+        bullets = slide.get('bullets', [])
+
+        bullet_html = ""
+        if bullets:
+            items = "".join(f"<li>{b}</li>" for b in bullets)
+            bullet_html = f'<ul style="text-align:left;font-size:0.85em">{items}</ul>'
+
+        # Alternate gradient backgrounds for visual variety
+        slide_num = slide.get('slide_number', 1)
+        gradients = [
+            "linear-gradient(135deg, #0f0c29, #302b63, #24243e)",
+            "linear-gradient(135deg, #1a1a2e, #16213e, #0f3460)",
+            "linear-gradient(135deg, #0d1117, #161b22, #21262d)",
+            "linear-gradient(135deg, #1e1e2e, #2d2d44, #1e1e2e)",
+        ]
+        bg = gradients[(slide_num - 1) % len(gradients)]
+
+        slides_html.append(f"""
+      <section data-background="{bg}">
+        <h2 style="color:#7c3aed;margin-bottom:0.5em">{headline}</h2>
+        <p style="font-size:0.9em;line-height:1.6">{body}</p>
+        {bullet_html}
+      </section>""")
+
+    all_slides = "\n".join(slides_html)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{title}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/night.css">
+  <style>
+    .reveal h1, .reveal h2, .reveal h3 {{ font-family: 'Inter', 'Segoe UI', sans-serif; }}
+    .reveal p, .reveal li {{ font-family: 'Inter', 'Segoe UI', sans-serif; }}
+    .reveal ul {{ list-style: none; padding-left: 0; }}
+    .reveal ul li::before {{ content: "→ "; color: #7c3aed; font-weight: bold; }}
+    .reveal ul li {{ margin-bottom: 0.5em; }}
+    .reveal section {{ text-align: left; padding: 40px; }}
+  </style>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+{all_slides}
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+  <script>
+    Reveal.initialize({{
+      hash: true,
+      transition: 'slide',
+      backgroundTransition: 'fade',
+      controls: true,
+      progress: true,
+    }});
+  </script>
+</body>
+</html>"""
+
+    html_path = workspace.write_file("output", "pitch_deck.html", html)
+
+    # Also save markdown version for reference
+    slides_md = [f"---\ntitle: {title}\n---\n"]
+    for slide in slides:
         slide_content = f"# {slide.get('title', 'Slide')}\n\n"
         slide_content += f"## {slide.get('headline', '')}\n\n"
         slide_content += slide.get("body", "") + "\n\n"
-
         if slide.get("bullets"):
             for b in slide["bullets"]:
                 slide_content += f"- {b}\n"
-
         slides_md.append(slide_content)
-
-    full_md = "\n---\n\n".join(slides_md)
-    md_path = workspace.write_file("output", "pitch_deck.md", full_md)
+    md_path = workspace.write_file("output", "pitch_deck.md", "\n---\n\n".join(slides_md))
 
     return {
         "deck_url": "",
-        "local_path": str(md_path),
-        "status": "completed (markdown fallback)",
+        "local_path": str(html_path),
+        "status": "completed (Reveal.js HTML)",
     }

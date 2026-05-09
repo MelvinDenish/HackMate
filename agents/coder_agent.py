@@ -55,6 +55,22 @@ CODER_SYSTEM_PROMPT = """You are a Coder Agent in an autonomous hackathon pipeli
 6. Use the exact file paths specified in the task
 7. Write tests alongside code when the task mentions testing
 
+## UI Quality Standards (CRITICAL for hackathon judging)
+When generating frontend code, the UI MUST look premium and modern:
+- Use a curated dark or light color palette with HSL-based colors (not plain red/blue/green)
+- Apply CSS variables for consistent theming: --primary, --surface, --text, --accent
+- Every interactive element needs: hover state (scale/opacity), active state, focus ring
+- Add CSS transitions (200-300ms ease) on ALL interactive elements
+- Include loading spinners or skeleton screens for async operations
+- Use proper spacing rhythm: 4px / 8px / 16px / 24px / 32px / 48px
+- Add subtle box-shadows on cards and elevated elements
+- Typography: Import Inter or Roboto from Google Fonts — never use system defaults
+- Include micro-animations: fade-in on page load (opacity 0→1 over 400ms)
+- Add gradient accents on primary CTAs and hero sections
+- Ensure fully responsive: mobile-first with breakpoints at 768px and 1024px
+- Every page must look populated — include seed/demo data, never "lorem ipsum"
+- Add <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
 ## Output Format
 For EACH file you create, use this exact format:
 
@@ -63,11 +79,31 @@ For EACH file you create, use this exact format:
 ```
 
 Example:
-```file:src/backend/server.js
-const express = require('express');
+```file:backend/server.js
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+dotenv.config();
+
 const app = express();
-// ... complete code
-module.exports = app;
+app.use(cors());
+app.use(express.json());
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error(`[Error] ${err.message}`);
+  res.status(err.status || 500).json({
+    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message
+  });
+});
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 ```
 
 Generate ALL files needed for this task. Each file block must contain the COMPLETE file — no truncation, no placeholders."""

@@ -103,12 +103,17 @@ def generate_search_queries(
         logger.warning("[Research] Failed to parse query JSON, using defaults")
 
     # Fallback: generate basic queries from the brief
-    return [
+    base_queries = [
         brief,
         f"{brief} market size 2025 2026",
         f"{brief} competitors",
         f"{brief} technology stack",
     ]
+    # Always add hackathon-meta queries
+    keywords = " ".join(brief.split()[:5])
+    base_queries.append(f"hackathon winning project {keywords} devpost")
+    base_queries.append(f"best hackathon demo {keywords} inspiration")
+    return base_queries
 
 
 def run_research(

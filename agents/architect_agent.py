@@ -70,17 +70,24 @@ ARCHITECT_SYSTEM_PROMPT = """You are the Architect Agent in an autonomous hackat
 - Each screen: layout, components, interactions
 - Navigation flow
 - Responsive design requirements
-- Color palette and design tokens
+- Color palette and design tokens (use HSL, not hex)
+- Typography: specify Google Font (Inter/Roboto/Outfit)
+- Dark mode / light mode preference
+- Loading states for all async operations
+- Micro-animations: fade-in, hover scale, transition timing
 
 ### 7. Core Business Logic
 - Key algorithms or processing pipelines
 - Validation rules
 - Edge cases to handle
 
-### 8. Demo Script
-- Step-by-step walkthrough for judges
-- What data to pre-populate
-- Expected user journey
+### 8. Demo Script & Seed Data (CRITICAL FOR JUDGING)
+- EXACT seed data to pre-populate (5-10 realistic records with specific names, dates, values)
+- The app MUST look "lived-in" when judges first open it — NEVER an empty dashboard
+- Step-by-step demo walkthrough (click X → see Y → click Z → wow moment)
+- Identify the single most impressive feature: the "hero moment"
+- What data appears on the landing/home page by default?
+- Include demo user credentials if auth is needed (e.g. demo@app.com / password123)
 
 ### 9. File Structure
 - Exact directory and file layout for the project
@@ -89,6 +96,13 @@ ARCHITECT_SYSTEM_PROMPT = """You are the Architect Agent in an autonomous hackat
 ### 10. Dependencies
 - Exact package names and versions
 - package.json or requirements.txt content
+
+### 11. README Specification
+- Project name and one-line tagline
+- Key features (3-5 bullets)
+- Tech stack list with emojis
+- Quick start commands (install, dev, build)
+- Architecture overview (brief mermaid diagram description)
 
 Be SPECIFIC. Use exact file names, exact endpoint paths, exact component names. The coding agents are stateless — they only see the PRD and their assigned task."""
 

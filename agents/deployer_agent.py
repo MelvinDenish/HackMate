@@ -36,7 +36,8 @@ DEPLOYER_SYSTEM_PROMPT = """You are a Deployer Agent. Generate deployment config
 Given the project structure and tech stack, generate:
 1. A Dockerfile (if not already present)
 2. A railway.json configuration file
-3. Any necessary start scripts
+3. A .env.example file listing ALL required environment variables
+4. Any necessary start scripts
 
 ## Rules
 - Use multi-stage Docker builds for smaller images
@@ -44,6 +45,8 @@ Given the project structure and tech stack, generate:
 - Set appropriate environment variables
 - Use production-optimized settings
 - Keep the Dockerfile minimal and efficient
+- Add a HEALTHCHECK instruction to verify the app is running
+- The .env.example should list every env var used in the code with placeholder values
 
 ## Output Format
 Use the ```file:path``` format:
@@ -54,6 +57,12 @@ FROM node:20-slim
 
 ```file:railway.json
 {...}
+```
+
+```file:.env.example
+# Required Environment Variables
+PORT=3000
+DATABASE_URL=postgres://user:pass@host:5432/db
 ```"""
 
 

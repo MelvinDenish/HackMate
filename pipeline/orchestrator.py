@@ -157,6 +157,15 @@ def build_pipeline(
             )
 
             status["architecture"] = "completed"
+
+            # Ingest PRD into Knowledge Base for downstream agents (pitch, reviewer)
+            try:
+                if kb and prd_path:
+                    kb.ingest_file(prd_path, doc_type="prd")
+                    logger.info("[Orchestrator] PRD ingested into Knowledge Base")
+            except Exception as e:
+                logger.warning(f"[Orchestrator] KB PRD ingestion failed (non-fatal): {e}")
+
             return {
                 "prd_path": prd_path,
                 "current_phase": "planning",
@@ -197,6 +206,61 @@ def build_pipeline(
 
         except Exception as e:
             logger.error(f"[Orchestrator] Planning failed: {e}")
+
+            # Fallback: generate minimal 4-task plan from PRD sections
+            try:
+                prd_path = state.get("prd_path", "")
+                if prd_path:
+                    logger.warning("[Orchestrator] Generating fallback task plan")
+                    fallback_tasks = [
+                        {
+                            "id": "task_001", "title": "Project Setup",
+                            "description": "Create package.json/requirements.txt, install dependencies, set up project structure per PRD",
+                            "role": "fullstack", "priority": 1, "dependencies": [],
+                            "acceptance_criteria": ["Project initializes without errors"],
+                            "estimated_files": ["package.json"], "relevant_prd_sections": ["Tech Stack", "Dependencies"],
+                            "complexity": "low", "status": "pending",
+                        },
+                        {
+                            "id": "task_002", "title": "Backend API",
+                            "description": "Implement all backend routes, database models, and core business logic per PRD",
+                            "role": "backend", "priority": 2, "dependencies": ["task_001"],
+                            "acceptance_criteria": ["API endpoints return expected responses"],
+                            "estimated_files": ["server.js", "routes.js"], "relevant_prd_sections": ["API Contract", "Database Schema", "Core Business Logic"],
+                            "complexity": "high", "status": "pending",
+                        },
+                        {
+                            "id": "task_003", "title": "Frontend UI",
+                            "description": "Implement all frontend pages, components, and styling per PRD UI/UX spec",
+                            "role": "frontend", "priority": 3, "dependencies": ["task_001"],
+                            "acceptance_criteria": ["All pages render without errors"],
+                            "estimated_files": ["index.html", "app.js", "styles.css"], "relevant_prd_sections": ["UI/UX Specification"],
+                            "complexity": "high", "status": "pending",
+                        },
+                        {
+                            "id": "task_004", "title": "Deployment Config",
+                            "description": "Create Dockerfile, deployment config, and README",
+                            "role": "fullstack", "priority": 4, "dependencies": ["task_002", "task_003"],
+                            "acceptance_criteria": ["Docker build succeeds"],
+                            "estimated_files": ["Dockerfile", "README.md"], "relevant_prd_sections": ["Dependencies"],
+                            "complexity": "low", "status": "pending",
+                        },
+                    ]
+                    import json
+                    task_path = workspace.write_json("tasks", "task_queue.json", fallback_tasks)
+                    status["planning"] = "completed"
+                    errors = list(state.get("errors", []))
+                    errors.append(f"Planning: Used fallback tasks ({e})")
+                    return {
+                        "task_queue_path": str(task_path),
+                        "task_records": fallback_tasks,
+                        "current_phase": "coding",
+                        "phase_status": status,
+                        "errors": errors,
+                    }
+            except Exception as fallback_err:
+                logger.error(f"[Orchestrator] Fallback planning also failed: {fallback_err}")
+
             status["planning"] = "failed"
             errors = list(state.get("errors", []))
             errors.append(f"Planning: {str(e)}")

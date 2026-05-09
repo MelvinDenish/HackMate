@@ -27,7 +27,7 @@ from workspace.manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
-DESLOPIFY_SYSTEM_PROMPT = """You are a Code Cleanup Agent in an autonomous hackathon pipeline. Your ONLY job is to remove slop from generated code WITHOUT changing functionality.
+DESLOPIFY_SYSTEM_PROMPT = """You are a Code Polish Agent in an autonomous hackathon pipeline. Your job is to remove slop from generated code AND add small quality touches that make the app feel professional — WITHOUT changing core functionality.
 
 ## What to REMOVE
 1. **Tests that test the language/framework, not business logic**
@@ -43,6 +43,15 @@ DESLOPIFY_SYSTEM_PROMPT = """You are a Code Cleanup Agent in an autonomous hacka
    - `TODO` and `FIXME` comments added by the generator
 4. **Unused imports and variables**
 5. **Redundant error re-throws** that add no context
+
+## What to ADD (Quick Polish Wins)
+1. **HTML files**: Add `<meta name="viewport" content="width=device-width, initial-scale=1.0">` if missing
+2. **HTML files**: Add `<title>` tag with app name if missing or generic
+3. **CSS files**: Add `*, *::before, *::after { box-sizing: border-box; }` if missing
+4. **CSS files**: Add `cursor: pointer` to all button/a[role=button] rules if missing
+5. **JS/TS files**: Wrap `console.log` in `if (process.env.NODE_ENV !== 'production')` guard
+6. **Python files**: Add `if __name__ == "__main__":` guard to entry point files if missing
+7. **All files**: Ensure consistent line endings and trailing newline
 
 ## What to KEEP (DO NOT REMOVE)
 - All actual business logic
