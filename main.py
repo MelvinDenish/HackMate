@@ -1,31 +1,31 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║  HACKATHON AUTOMATION PIPELINE v2 — CLI Entry Point          ║
+║  HACKATHON AUTOMATION PIPELINE v5 — CLI Entry Point          ║
 ║                                                              ║
 ║  Usage:                                                      ║
 ║    python main.py "Build an AI study buddy app"              ║
 ║    python main.py --skip-clarify "Build a fintech dashboard" ║
 ║    python main.py --budget 5.00 "Build a todo app"           ║
 ║                                                              ║
-║  Improvements over v1:                                       ║
-║  ✅ Real-time cost tracking dashboard                        ║
-║  ✅ Budget limit enforcement                                 ║
-║  ✅ Enhanced phase status with new De-Sloppify + Security    ║
-║  ✅ Cost report display at completion                        ║
-║  ✅ Budget configurable via --budget flag or env var          ║
+║  v5 Improvements:                                            ║
+║  ✅ TDD Verification Loop (auto-generated tests)            ║
+║  ✅ Template Library (40% coding budget savings)             ║
+║  ✅ CI/CD Auto-Generation (GitHub Actions + Dockerfile)      ║
+║  ✅ Demo Data Seeding (realistic populated UIs)              ║
+║  ✅ Langfuse-Compatible Tracing (local JSONL fallback)       ║
+║  ✅ A/B Testing Framework (prompt evolution)                 ║
+║  ✅ Approval Gates (human-in-the-loop)                       ║
+║  ✅ Cross-Run Learning Flywheel (gets smarter each run)      ║
+║  ✅ Runtime Fact Tracing (catches startup crashes)            ║
+║  ✅ Smart Budget Redistribution (dynamic phase budgets)       ║
+║  ✅ Pydantic Structured Output (zero-parse-failure)          ║
 ║                                                              ║
-║  Flow (v2):                                                  ║
-║  0. Clarification (interactive)                              ║
-║  1. Research → 2a. Architecture → 2b. Planning               ║
-║  3a. Coding → 3a.5. De-Sloppify → 3b. Review ↺              ║
-║  3c. Security → 3d. Deploy → 4a. Pitch → 4b. Presentation   ║
-║                                                              ║
-║  Multi-Provider LLM Architecture:                            ║
-║  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐       ║
-║  │  Anthropic   │  │    Google     │  │   Moonshot    │       ║
-║  │Claude Sonnet4│  │Gemini 2.5    │  │   Kimi k2     │       ║
-║  │Claude Haiku  │  │Flash / Pro   │  │  Multimodal   │       ║
-║  └──────────────┘  └──────────────┘  └───────────────┘       ║
+║  Flow (v5):                                                  ║
+║  0. Clarification → 1. Research → 2a. Arch → 2b. Plan       ║
+║  3a. Code(+templates) → 3a.5 DeSlopify → 3b. TDD Tests      ║
+║  3c. Readme → 3d. Self-Critique → 4. Review ↺               ║
+║  5. Security → 6. CI/CD → 7. Seed → 8. Deploy               ║
+║  9. Pitch → 10. Present                                      ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 

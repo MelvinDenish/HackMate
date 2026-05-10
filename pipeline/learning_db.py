@@ -237,6 +237,93 @@ class LearningDB:
 
         return [dict(r) for r in rows]
 
+    def get_insights(self, tech_stack: str = "") -> str:
+        """Generate actionable insights from historical runs.
+
+        Returns a formatted string suitable for injection into agent prompts.
+        This is the READ side of the cross-run learning flywheel.
+        """
+        insights = []
+
+        # 1. Overall stats
+        stats = self.get_stats()
+        total_runs = stats.get("total_runs", 0)
+        if total_runs == 0:
+            return "No historical data available (first run)."
+
+        insights.append(f"Based on {total_runs} previous pipeline runs:")
+
+        # 2. Average cost and duration
+        avg_cost = stats.get("avg_cost", 0)
+        avg_dur = stats.get("avg_duration", 0)
+        if avg_cost:
+            insights.append(f"- Average cost: ${avg_cost:.2f} per run")
+        if avg_dur:
+            insights.append(f"- Average duration: {avg_dur/60:.1f} minutes")
+
+        # 3. Review pass rate
+        avg_iters = stats.get("avg_review_iterations", 0)
+        if avg_iters:
+            if avg_iters > 1.5:
+                insights.append(
+                    f"- ⚠️ Average review iterations: {avg_iters:.1f} "
+                    f"(aim for <1.5 — write more defensive code)"
+                )
+            else:
+                insights.append(f"- ✅ Review iterations: {avg_iters:.1f} (good)")
+
+        # 4. Stack-specific insights
+        if tech_stack:
+            stack_row = self._conn.execute(
+                """SELECT COUNT(*) as runs,
+                          AVG(review_iterations) as avg_iters,
+                          AVG(total_cost_usd) as avg_cost,
+                          SUM(deployment_success) * 100.0 / MAX(COUNT(*), 1) as deploy_rate
+                   FROM runs WHERE tech_stack LIKE ?""",
+                (f"%{tech_stack}%",)
+            ).fetchone()
+
+            if stack_row and dict(stack_row).get("runs", 0) > 0:
+                sr = dict(stack_row)
+                insights.append(f"\nFor '{tech_stack}' projects ({sr['runs']} runs):")
+                if sr.get("deploy_rate"):
+                    insights.append(f"- Deploy success rate: {sr['deploy_rate']:.0f}%")
+                if sr.get("avg_cost"):
+                    insights.append(f"- Average cost: ${sr['avg_cost']:.2f}")
+
+        # 5. Common security issues
+        sec_issues = self.get_common_security_issues(5)
+        if sec_issues:
+            insights.append("\nCommon security issues to prevent:")
+            for issue in sec_issues[:5]:
+                insights.append(
+                    f"- {issue['severity']}: {issue['finding_type']} "
+                    f"(seen {issue['frequency']}x)"
+                )
+
+        # 6. Task complexity insights
+        task_row = self._conn.execute(
+            """SELECT role, complexity,
+                      COUNT(*) as count,
+                      AVG(syntax_errors_found) as error_rate
+               FROM task_outcomes
+               GROUP BY role, complexity
+               ORDER BY error_rate DESC
+               LIMIT 5"""
+        ).fetchall()
+
+        if task_row:
+            high_error = [dict(r) for r in task_row if dict(r).get("error_rate", 0) > 0.3]
+            if high_error:
+                insights.append("\nHigh-error-rate task types (need extra care):")
+                for t in high_error:
+                    insights.append(
+                        f"- {t['role']}/{t['complexity']}: "
+                        f"{t['error_rate']*100:.0f}% error rate"
+                    )
+
+        return "\n".join(insights)
+
     def close(self):
         """Close the database connection."""
         self._conn.close()

@@ -156,6 +156,36 @@ class CostTracker:
             by_phase[r.phase] = by_phase.get(r.phase, 0) + r.cost_usd
         return by_phase
 
+    def redistribute_savings(self, phase: str, budgeted: float, phase_budgets: dict) -> dict:
+        """Redistribute under-spend from a completed phase to downstream phases.
+
+        Args:
+            phase: The phase that just completed
+            budgeted: The original budget for this phase
+            phase_budgets: Mutable dict of remaining phase budgets
+
+        Returns:
+            Updated phase_budgets dict
+        """
+        actual = self.cost_by_phase().get(phase, 0)
+        savings = max(0, budgeted - actual)
+
+        if savings > 0.01:  # Only redistribute meaningful savings
+            # 80% to coding, 20% to review
+            coding_bonus = savings * 0.8
+            review_bonus = savings * 0.2
+
+            phase_budgets["coding"] = phase_budgets.get("coding", 0) + coding_bonus
+            phase_budgets["review"] = phase_budgets.get("review", 0) + review_bonus
+
+            logger.info(
+                f"[Budget] Phase '{phase}' saved ${savings:.4f} "
+                f"(budgeted ${budgeted:.4f}, spent ${actual:.4f}). "
+                f"Redistributed: coding +${coding_bonus:.4f}, review +${review_bonus:.4f}"
+            )
+
+        return phase_budgets
+
     def cost_by_provider(self) -> dict[str, float]:
         """Aggregate cost per LLM provider."""
         by_provider: dict[str, float] = {}

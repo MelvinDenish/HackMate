@@ -65,6 +65,16 @@ from pipeline.progress_server import record_event as ws_event
 from agents.readme_agent import run_readme_agent
 from pipeline.context_utils import compact_src_tree, compact_review_notes
 
+# v5 Feature imports
+from pipeline.template_selector import select_template, inject_template
+from pipeline.tracing import init_tracing, trace_agent, score_trace, get_trace_summary
+from pipeline.approval_gate import create_gate
+from pipeline.ab_testing import get_ab_registry
+from agents.cicd_agent import generate_cicd
+from agents.test_writer_agent import generate_tests, run_tests
+from tools.runtime_tracer import trace_runtime, format_runtime_facts
+from tools.demo_seeder import generate_seed_data, write_seed_files
+
 logger = logging.getLogger(__name__)
 
 
@@ -168,6 +178,17 @@ def build_pipeline(
                     "[Orchestrator] No dossier available — architect will proceed "
                     "with refined brief only (fail-forward)"
                 )
+
+            # v5: Inject cross-run learning insights
+            try:
+                learning_db = LearningDB()
+                insights = learning_db.get_insights(tech_stack=state.get("tech_stack", ""))
+                if insights and "No historical data" not in insights:
+                    refined_brief = refined_brief + f"\n\n## Historical Intelligence\n{insights}"
+                    logger.info("[Orchestrator] Cross-run insights injected into architect context")
+                learning_db.close()
+            except Exception as e:
+                logger.debug(f"[Orchestrator] Learning insights unavailable: {e}")
 
             prd_path = run_architect(
                 refined_brief, dossier_path, workspace, config,
@@ -300,6 +321,17 @@ def build_pipeline(
 
             iteration = state.get("review_iteration", 0)
             if iteration == 0:
+                # v5: Inject template scaffold before coding
+                try:
+                    prd_content = workspace.read_file(prd_path) if prd_path else ""
+                    tech_stack = state.get("tech_stack", "")
+                    template_key = select_template(prd_content, tech_stack)
+                    if template_key:
+                        scaffold_files = inject_template(template_key, workspace.src_dir)
+                        logger.info(f"[Orchestrator] Template '{template_key}': {len(scaffold_files)} files injected")
+                except Exception as e:
+                    logger.warning(f"[Orchestrator] Template injection failed (non-fatal): {e}")
+
                 # First pass: execute all tasks
                 code_files = execute_all_tasks(
                     tasks, prd_path, workspace, config,
@@ -825,32 +857,125 @@ def build_pipeline(
             "security_verdict": "WARN (auto-fixed)",
         }
 
+    # ── v5 Nodes ──────────────────────────────────────────────
+
+    def test_node(state: PipelineState) -> dict:
+        """Phase 3b: TDD Test Generation + Execution"""
+        logger.info("═══ PHASE 3b: TDD TEST GENERATION ═══")
+        _notify("testing", "running")
+        status = dict(state.get("phase_status", {}))
+        status["testing"] = "running"
+
+        try:
+            tasks = state.get("task_records", [])
+            prd_path = state.get("prd_path", "")
+            prd_content = workspace.read_file(prd_path) if prd_path else ""
+            src_tree = workspace.get_src_tree()
+
+            # Generate test files
+            test_files = generate_tests(
+                workspace, config, tasks, prd_content, src_tree,
+                cost_tracker=cost_tracker,
+            )
+
+            # Run runtime trace to catch startup errors
+            runtime = trace_runtime(workspace.src_dir, timeout=10)
+            runtime_facts = format_runtime_facts(runtime)
+
+            if runtime.get("errors"):
+                logger.warning(f"[Orchestrator] Runtime issues: {len(runtime['errors'])} errors")
+
+            status["testing"] = "completed"
+            return {
+                "test_files": test_files,
+                "runtime_trace": runtime_facts,
+                "current_phase": "readme",
+                "phase_status": status,
+            }
+
+        except Exception as e:
+            logger.warning(f"[Orchestrator] Test generation failed (non-fatal): {e}")
+            status["testing"] = "skipped"
+            return {"phase_status": status, "current_phase": "readme"}
+
+    def cicd_node(state: PipelineState) -> dict:
+        """Phase 7b: CI/CD Pipeline Generation"""
+        logger.info("═══ PHASE 7b: CI/CD GENERATION ═══")
+        _notify("cicd", "running")
+        status = dict(state.get("phase_status", {}))
+
+        try:
+            tech_stack = state.get("tech_stack", "")
+            cicd_files = generate_cicd(workspace.src_dir, tech_stack)
+
+            status["cicd"] = "completed"
+            return {
+                "cicd_files": cicd_files,
+                "phase_status": status,
+            }
+        except Exception as e:
+            logger.warning(f"[Orchestrator] CI/CD generation failed (non-fatal): {e}")
+            status["cicd"] = "skipped"
+            return {"phase_status": status}
+
+    def seed_node(state: PipelineState) -> dict:
+        """Phase 7c: Demo Data Seeding"""
+        logger.info("═══ PHASE 7c: DEMO SEEDING ═══")
+        _notify("seeding", "running")
+        status = dict(state.get("phase_status", {}))
+
+        try:
+            prd_path = state.get("prd_path", "")
+            prd_content = workspace.read_file(prd_path) if prd_path else ""
+            src_tree = workspace.get_src_tree()
+
+            seed_data = generate_seed_data(
+                workspace, config, prd_content, src_tree,
+                cost_tracker=cost_tracker,
+            )
+            seed_files = write_seed_files(seed_data, workspace.src_dir)
+
+            status["seeding"] = "completed"
+            return {
+                "seed_files": seed_files,
+                "demo_walkthrough": seed_data.get("demo_walkthrough", []),
+                "phase_status": status,
+            }
+        except Exception as e:
+            logger.warning(f"[Orchestrator] Demo seeding failed (non-fatal): {e}")
+            status["seeding"] = "skipped"
+            return {"phase_status": status}
+
     # ── Build the Graph ───────────────────────────────────────
 
     graph = StateGraph(PipelineState)
 
-    # Add nodes (v4: includes readme, self_critique)
+    # Add nodes (v5: includes test, cicd, seed nodes)
     graph.add_node("research_node", research_node)
     graph.add_node("architect_node", architect_node)
     graph.add_node("plan_node", plan_node)
     graph.add_node("code_node", code_node)
     graph.add_node("deslopify_node", deslopify_node)
+    graph.add_node("test_node", test_node)          # v5: TDD
     graph.add_node("readme_node", readme_node)
     graph.add_node("self_critique_node", self_critique_node)
     graph.add_node("review_node", review_node)
     graph.add_node("security_node", security_node)
     graph.add_node("security_fix_node", security_fix_node)
+    graph.add_node("cicd_node", cicd_node)           # v5: CI/CD
+    graph.add_node("seed_node", seed_node)            # v5: Demo seeding
     graph.add_node("deploy_node", deploy_node)
     graph.add_node("pitch_node", pitch_node)
     graph.add_node("present_node", present_node)
 
-    # Add edges (v4: code → deslopify → readme → self-critique → review)
+    # Add edges (v5: code → deslopify → test → readme → self-critique → review)
     graph.set_entry_point("research_node")
     graph.add_edge("research_node", "architect_node")
     graph.add_edge("architect_node", "plan_node")
     graph.add_edge("plan_node", "code_node")
     graph.add_edge("code_node", "deslopify_node")
-    graph.add_edge("deslopify_node", "readme_node")
+    graph.add_edge("deslopify_node", "test_node")       # v5: TDD after polish
+    graph.add_edge("test_node", "readme_node")           # v5: test → readme
     graph.add_edge("readme_node", "self_critique_node")
     graph.add_edge("self_critique_node", "review_node")
 
@@ -864,25 +989,28 @@ def build_pipeline(
         },
     )
 
-    # Conditional: security → fix (critical) or deploy (pass/warn)
+    # Conditional: security → fix (critical) or cicd (pass/warn)
     graph.add_conditional_edges(
         "security_node",
         security_router,
         {
             "security_fix_node": "security_fix_node",
-            "deploy_node": "deploy_node",
+            "deploy_node": "cicd_node",         # v5: security → cicd before deploy
         },
     )
-    graph.add_edge("security_fix_node", "deploy_node")
+    graph.add_edge("security_fix_node", "cicd_node")  # v5: fix → cicd
+    graph.add_edge("cicd_node", "seed_node")           # v5: cicd → seed
+    graph.add_edge("seed_node", "deploy_node")         # v5: seed → deploy
 
     graph.add_edge("deploy_node", "pitch_node")
     graph.add_edge("pitch_node", "present_node")
     graph.add_edge("present_node", END)
 
-    logger.info("[Orchestrator] Pipeline graph v4.0 built successfully")
+    logger.info("[Orchestrator] Pipeline graph v5.0 built successfully")
     logger.info(
-        "[Orchestrator] Flow: research → architect → plan → code(+validate+design) → "
-        "deslopify → readme → self-critique → review ↺ → security ↺ → deploy(+screenshot) → pitch → present"
+        "[Orchestrator] Flow: research → architect → plan → code → deslopify → "
+        "test → readme → self-critique → review ↺ → security ↺ → cicd → seed → "
+        "deploy → pitch → present"
     )
 
     # Compile with SQLite checkpointing for resume-on-crash
@@ -919,10 +1047,17 @@ def run_pipeline(
         Final pipeline state with all outputs
     """
     logger.info("╔══════════════════════════════════════════════╗")
-    logger.info("║  HACKATHON PIPELINE v4 — STARTING EXECUTION  ║")
+    logger.info("║  HACKATHON PIPELINE v5 — STARTING EXECUTION  ║")
     logger.info("╚══════════════════════════════════════════════╝")
 
     run_start = time.time()
+
+    # v5: Initialize tracing subsystem
+    try:
+        init_tracing(workspace.logs_dir)
+        logger.info("[Orchestrator] 📊 Tracing initialized")
+    except Exception as e:
+        logger.debug(f"[Orchestrator] Tracing init failed: {e}")
 
     # Start WebSocket progress server (non-blocking, non-fatal)
     try:

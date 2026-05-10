@@ -44,3 +44,6 @@ typer>=0.15.0
 # --- Utilities ---
 tenacity>=9.0.0                     # Retry logic for API calls
 jinja2>=3.1.0                       # Template rendering
+
+# --- v5: Observability ---
+langfuse>=2.0.0                     # Tracing + evaluation (optional, local fallback)

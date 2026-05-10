@@ -7,8 +7,8 @@
 ║  reads from and writes to specific state fields.             ║
 ║                                                              ║
 ║  Data Flow:                                                  ║
-║  User Input → Clarification → Dossier → PRD → Tasks →       ║
-║  Code → Review → Deploy → Pitch → Presentation              ║
+║  User Input → Clarification → Dossier → PRD → Tasks →        ║
+║  Code → Review → Deploy → Pitch → Presentation               ║
 ║                                                              ║
 ║  Handoff Pattern: "Delegation by Reference"                  ║
 ║  Agents pass FILE PATHS (not raw content) to preserve        ║
@@ -126,6 +126,13 @@ class PipelineState(TypedDict, total=False):
     # ── v2: Security & Cleanup ──
     security_verdict: str         # PASS, WARN, FAIL
     security_findings: str        # Security review findings summary
+
+    # ── v5: TDD + CI/CD + Demo Seeding ──
+    test_files: list[str]         # Generated test file paths
+    runtime_trace: str            # Runtime startup trace results
+    cicd_files: list[str]         # Generated CI/CD file paths
+    seed_files: list[str]         # Generated seed data file paths
+    demo_walkthrough: list[str]   # Demo steps for presentation
 
 
 def create_initial_state(problem_statement: str) -> PipelineState:

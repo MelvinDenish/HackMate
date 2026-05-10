@@ -103,6 +103,82 @@ _circuit_breakers: dict[str, CircuitBreaker] = {
 }
 
 
+class ProviderHealthTracker:
+    """Track provider health metrics for intelligent routing.
+
+    Extends circuit breakers with latency and success tracking
+    to enable score-based provider selection.
+    """
+
+    def __init__(self):
+        self._stats: dict[str, dict] = {}
+
+    def record_call(self, provider: str, latency_s: float, success: bool, cost: float = 0):
+        """Record a provider API call outcome."""
+        if provider not in self._stats:
+            self._stats[provider] = {
+                "calls": 0, "successes": 0,
+                "total_latency": 0, "total_cost": 0,
+            }
+
+        s = self._stats[provider]
+        s["calls"] += 1
+        s["total_latency"] += latency_s
+        s["total_cost"] += cost
+        if success:
+            s["successes"] += 1
+
+    def get_best_provider(self, candidates: list[str]) -> Optional[str]:
+        """Select the best provider from candidates based on composite score.
+
+        Score = (1 - error_rate) * (1 / avg_latency) * (1 / avg_cost)
+        Higher is better.
+        """
+        if not candidates:
+            return None
+
+        scored = []
+        for p in candidates:
+            if p not in self._stats or self._stats[p]["calls"] == 0:
+                scored.append((p, 1.0))  # Optimistic prior for untested
+                continue
+
+            s = self._stats[p]
+            error_rate = 1 - (s["successes"] / s["calls"])
+            avg_latency = max(0.1, s["total_latency"] / s["calls"])
+            avg_cost = max(0.001, s["total_cost"] / s["calls"])
+
+            # Composite score — higher is better
+            score = (1 - error_rate) * (1 / avg_latency) * (1 / avg_cost)
+            scored.append((p, score))
+
+        best = max(scored, key=lambda x: x[1])
+        if len(scored) > 1:
+            logger.debug(
+                f"[LB] Provider scores: {', '.join(f'{p}={s:.2f}' for p, s in scored)} "
+                f"→ selected {best[0]}"
+            )
+        return best[0]
+
+    def get_summary(self) -> str:
+        """Get formatted health summary."""
+        if not self._stats:
+            return "No provider metrics yet."
+        lines = ["📊 Provider Health:"]
+        for p, s in sorted(self._stats.items()):
+            rate = s["successes"] / s["calls"] * 100 if s["calls"] else 0
+            avg_lat = s["total_latency"] / s["calls"] if s["calls"] else 0
+            lines.append(
+                f"  {p}: {rate:.0f}% success, {avg_lat:.1f}s avg latency, "
+                f"${s['total_cost']:.4f} total ({s['calls']} calls)"
+            )
+        return "\n".join(lines)
+
+
+# Global health tracker
+_health_tracker = ProviderHealthTracker()
+
+
 def _estimate_tokens(messages: list) -> int:
     """Rough token estimate: ~4 chars per token across providers."""
     total_chars = 0
@@ -426,3 +502,73 @@ def _invoke_fallback(
 
     logger.info(f"[LLM] Fallback {fallback_spec.model_name} succeeded")
     return response
+
+
+def invoke_structured(
+    llm: BaseChatModel,
+    messages: list[BaseMessage],
+    schema,
+    *,
+    spec: ModelSpec,
+    agent_name: str = "unknown",
+    phase: str = "unknown",
+    cost_tracker: Optional[CostTracker] = None,
+    keys: Optional[APIKeys] = None,
+):
+    """Invoke LLM with Pydantic structured output enforcement.
+
+    Tries native with_structured_output first (Anthropic/Google support).
+    Falls back to regular invoke + safe_parse_json if unsupported.
+
+    Args:
+        schema: Pydantic BaseModel class defining expected output shape
+    Returns:
+        Parsed Pydantic model instance, or dict on fallback
+    """
+    from pipeline.schemas import safe_parse_json
+
+    # Strategy 1: Native structured output (provider-level enforcement)
+    try:
+        structured_llm = llm.with_structured_output(schema)
+        cached_msgs = _apply_prompt_caching(messages, spec)
+
+        import concurrent.futures
+        timeout = MODEL_TIMEOUTS.get(spec.model_name, 180)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(structured_llm.invoke, cached_msgs)
+            result = future.result(timeout=timeout)
+
+        # Track cost (structured calls still have token usage)
+        if cost_tracker and hasattr(result, 'response_metadata'):
+            # Some providers attach metadata to structured output
+            pass  # Cost tracked via the underlying invoke
+
+        logger.info(f"[LLM] Structured output success: {agent_name}/{phase}")
+        return result
+
+    except (NotImplementedError, TypeError, AttributeError) as e:
+        logger.info(f"[LLM] Native structured output not available ({e}), using fallback parse")
+
+    except Exception as e:
+        logger.warning(f"[LLM] Structured output failed ({e}), falling back to text parse")
+
+    # Strategy 2: Regular invoke + JSON parse + Pydantic validation
+    response = invoke_with_retry(
+        llm, messages, spec=spec, agent_name=agent_name,
+        phase=phase, cost_tracker=cost_tracker, keys=keys,
+    )
+
+    raw = response.content
+    parsed = safe_parse_json(raw, schema)
+
+    if parsed is not None:
+        if isinstance(parsed, dict):
+            try:
+                return schema(**parsed)
+            except Exception:
+                return parsed
+        return parsed
+
+    logger.warning(f"[LLM] Structured parse failed for {agent_name}, returning raw dict")
+    return {"raw": raw}
+
