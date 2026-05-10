@@ -84,25 +84,31 @@ class KnowledgeBase:
         """
         Ingest a document into the knowledge base.
 
-        Splits the document into chunks and stores each chunk
-        with its embedding and metadata.
+        Uses markdown-aware chunking that splits at heading boundaries,
+        preserving section integrity for better RAG retrieval.
+        Falls back to character-count chunking for non-markdown content.
 
         Args:
             content: Full document text
             source: Source identifier (e.g. file path, URL)
             doc_type: Document type for filtering
-            chunk_size: Characters per chunk
-            chunk_overlap: Overlap between chunks
+            chunk_size: Characters per chunk (used for fallback/large sections)
+            chunk_overlap: Overlap between chunks (used for fallback)
 
         Returns:
             Number of chunks ingested
         """
-        # Simple chunking by character count
-        chunks = []
-        for i in range(0, len(content), chunk_size - chunk_overlap):
-            chunk = content[i:i + chunk_size]
-            if chunk.strip():
-                chunks.append(chunk)
+        import re
+
+        # Try markdown-aware chunking first
+        chunks = self._chunk_markdown(content, chunk_size)
+
+        # Fallback to character-count chunking if markdown chunking yields nothing
+        if not chunks:
+            for i in range(0, len(content), chunk_size - chunk_overlap):
+                chunk = content[i:i + chunk_size]
+                if chunk.strip():
+                    chunks.append(chunk)
 
         if not chunks:
             logger.warning(f"[KB] No chunks to ingest from {source}")
@@ -128,6 +134,39 @@ class KnowledgeBase:
 
         logger.info(f"[KB] Ingested {len(chunks)} chunks from {source}")
         return len(chunks)
+
+    @staticmethod
+    def _chunk_markdown(content: str, max_chunk_size: int = 1500) -> list[str]:
+        """Split markdown content at heading boundaries.
+        Preserves section integrity for better retrieval quality."""
+        import re
+
+        # Split at markdown headings (##, ###, etc.)
+        sections = re.split(r'(?=^#{1,3}\s)', content, flags=re.MULTILINE)
+        chunks = []
+        current_chunk = ""
+
+        for section in sections:
+            section = section.strip()
+            if not section:
+                continue
+
+            # If adding this section exceeds max size, flush current chunk
+            if current_chunk and len(current_chunk) + len(section) > max_chunk_size:
+                chunks.append(current_chunk.strip())
+                current_chunk = section
+            else:
+                current_chunk += "\n\n" + section if current_chunk else section
+
+        # Don't forget the last chunk
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+
+        # If no heading-based splits happened, return empty (will use fallback)
+        if len(chunks) <= 1 and len(content) > max_chunk_size:
+            return []
+
+        return chunks
 
     def ingest_file(self, file_path: str, doc_type: str = "research") -> int:
         """Ingest a file from the workspace into the knowledge base."""

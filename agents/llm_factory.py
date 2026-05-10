@@ -21,7 +21,7 @@ import logging
 from typing import Optional
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, AIMessage
+from langchain_core.messages import BaseMessage, AIMessage, SystemMessage
 
 from config import ModelSpec, APIKeys
 from pipeline.cost_tracker import CostTracker, CostRecord
@@ -51,6 +51,55 @@ MODEL_TIMEOUTS = {
     "gemini-2.5-flash": 120,
     "gemini-2.5-pro": 240,
     "kimi-k2": 120,
+}
+
+# Model fallback chains — try next provider if primary fails
+FALLBACK_MODELS = {
+    "claude-sonnet-4-20250514": ModelSpec("google", "gemini-2.5-pro", 0.2, 8192),
+    "claude-haiku-3-5-20241022": ModelSpec("google", "gemini-2.5-flash", 0.1, 8192),
+    "gemini-2.5-pro": ModelSpec("anthropic", "claude-sonnet-4-20250514", 0.1, 8192),
+    "gemini-2.5-flash": ModelSpec("anthropic", "claude-haiku-3-5-20241022", 0.1, 8192),
+    "kimi-k2": ModelSpec("anthropic", "claude-haiku-3-5-20241022", 0.4, 4096),
+}
+
+
+# ── Circuit Breaker ──────────────────────────────────────────
+
+class CircuitBreaker:
+    """Trip after N failures within window, auto-reset after cooldown.
+    Prevents runaway budget drain during API outages."""
+
+    def __init__(self, threshold: int = 5, cooldown_seconds: int = 60):
+        self.threshold = threshold
+        self.cooldown = cooldown_seconds
+        self.failures = 0
+        self.last_failure_time = 0.0
+
+    def record_failure(self):
+        self.failures += 1
+        self.last_failure_time = time.time()
+
+    def record_success(self):
+        self.failures = max(0, self.failures - 1)
+
+    def is_open(self) -> bool:
+        """Returns True if circuit is OPEN (should not attempt calls)."""
+        if self.failures >= self.threshold:
+            elapsed = time.time() - self.last_failure_time
+            if elapsed > self.cooldown:
+                # Cooldown expired — reset and allow retry
+                self.failures = 0
+                logger.info("[CircuitBreaker] Reset after cooldown")
+                return False
+            return True
+        return False
+
+
+# Per-provider circuit breakers
+_circuit_breakers: dict[str, CircuitBreaker] = {
+    "anthropic": CircuitBreaker(threshold=5, cooldown_seconds=60),
+    "google": CircuitBreaker(threshold=5, cooldown_seconds=60),
+    "moonshot": CircuitBreaker(threshold=5, cooldown_seconds=60),
 }
 
 
@@ -86,7 +135,7 @@ def create_llm(spec: ModelSpec, keys: APIKeys) -> BaseChatModel:
     Create a LangChain chat model from a ModelSpec and API keys.
 
     Routes to the correct provider based on spec.provider:
-    - "anthropic" → ChatAnthropic
+    - "anthropic" → ChatAnthropic (with prompt caching enabled)
     - "google"    → ChatGoogleGenerativeAI
     - "moonshot"  → ChatOpenAI (OpenAI-compatible API)
     """
@@ -99,8 +148,10 @@ def create_llm(spec: ModelSpec, keys: APIKeys) -> BaseChatModel:
             api_key=keys.anthropic,
             temperature=spec.temperature,
             max_tokens=spec.max_tokens,
+            # Enable prompt caching — 90% cost reduction on cached prefixes
+            extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"},
         )
-        logger.info(f"[LLM] Created Anthropic model: {spec.model_name}")
+        logger.info(f"[LLM] Created Anthropic model: {spec.model_name} (cache-enabled)")
         return llm
 
     elif spec.provider == "google":
@@ -197,6 +248,33 @@ def _extract_token_usage(response: AIMessage) -> dict:
     return usage
 
 
+def _apply_prompt_caching(messages: list[BaseMessage], spec: ModelSpec) -> list[BaseMessage]:
+    """Apply Anthropic prompt caching to system messages.
+    Marks the first SystemMessage as cacheable so repeat calls
+    with the same system prompt get 90% cost reduction on the prefix."""
+    if spec.provider != "anthropic":
+        return messages
+
+    cached = list(messages)
+    for i, msg in enumerate(cached):
+        if isinstance(msg, SystemMessage) and isinstance(msg.content, str):
+            # Only cache system prompts > 1024 chars (Anthropic minimum)
+            if len(msg.content) > 1024:
+                cached[i] = SystemMessage(
+                    content=[
+                        {
+                            "type": "text",
+                            "text": msg.content,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+                )
+                logger.debug(f"[LLM] Prompt caching enabled for system message ({len(msg.content)} chars)")
+            break  # Only cache the first system message
+
+    return cached
+
+
 def invoke_with_retry(
     llm: BaseChatModel,
     messages: list[BaseMessage],
@@ -206,25 +284,16 @@ def invoke_with_retry(
     phase: str = "unknown",
     cost_tracker: Optional[CostTracker] = None,
     max_retries: int = _MAX_RETRIES,
+    keys: Optional[APIKeys] = None,
 ) -> AIMessage:
     """
-    Invoke an LLM with retry logic, cost tracking, and error handling.
+    Invoke an LLM with retry logic, cost tracking, circuit breaker,
+    prompt caching, and model fallback.
 
-    Args:
-        llm: The LangChain chat model
-        messages: Messages to send
-        spec: Model specification (for cost calculation)
-        agent_name: Name of the calling agent (for cost tracking)
-        phase: Pipeline phase (for cost tracking)
-        cost_tracker: Optional CostTracker for budget enforcement
-        max_retries: Maximum retry attempts for transient errors
-
-    Returns:
-        AIMessage response
-
-    Raises:
-        BudgetExceededError: If cumulative cost exceeds budget
-        Exception: If all retries exhausted or non-transient error
+    v3 improvements:
+    - Prompt caching for Anthropic (90% prefix cost reduction)
+    - Circuit breaker (prevents runaway spend during outages)
+    - Model fallback chain (survives single-provider failures)
     """
     last_error = None
     timeout = MODEL_TIMEOUTS.get(spec.model_name, 180)
@@ -232,12 +301,27 @@ def invoke_with_retry(
     # Pre-flight: check if prompt fits the model context
     _check_context_budget(messages, spec)
 
+    # Check circuit breaker
+    breaker = _circuit_breakers.get(spec.provider)
+    if breaker and breaker.is_open():
+        logger.warning(
+            f"[LLM] Circuit breaker OPEN for {spec.provider}. "
+            f"Attempting fallback..."
+        )
+        return _invoke_fallback(
+            messages, spec=spec, agent_name=agent_name,
+            phase=phase, cost_tracker=cost_tracker, keys=keys,
+        )
+
+    # Apply prompt caching for Anthropic
+    cached_messages = _apply_prompt_caching(messages, spec)
+
     for attempt in range(max_retries):
         try:
             # Timeout guard: use threading to prevent infinite hangs
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(llm.invoke, messages)
+                future = executor.submit(llm.invoke, cached_messages)
                 try:
                     response = future.result(timeout=timeout)
                 except concurrent.futures.TimeoutError:
@@ -258,6 +342,10 @@ def invoke_with_retry(
                 )
                 cost_tracker.record(record)  # Raises BudgetExceededError if over
 
+            # Record success for circuit breaker
+            if breaker:
+                breaker.record_success()
+
             return response
 
         except Exception as e:
@@ -266,6 +354,10 @@ def invoke_with_retry(
             # Don't retry budget exceeded
             if "BudgetExceeded" in type(e).__name__:
                 raise
+
+            # Record failure for circuit breaker
+            if breaker:
+                breaker.record_failure()
 
             if _is_retryable(e) and attempt < max_retries - 1:
                 wait = 2 ** attempt  # 1s, 2s, 4s
@@ -276,11 +368,61 @@ def invoke_with_retry(
                 )
                 time.sleep(wait)
             else:
-                # Non-retryable or final attempt
+                # All retries exhausted — try fallback model
                 logger.error(
                     f"[LLM] Failed after {attempt + 1} attempts: "
                     f"{type(e).__name__}: {str(e)[:200]}"
                 )
+                if keys:
+                    try:
+                        return _invoke_fallback(
+                            messages, spec=spec, agent_name=agent_name,
+                            phase=phase, cost_tracker=cost_tracker, keys=keys,
+                        )
+                    except Exception as fallback_err:
+                        logger.error(f"[LLM] Fallback also failed: {fallback_err}")
                 raise
 
     raise last_error  # type: ignore
+
+
+def _invoke_fallback(
+    messages: list[BaseMessage],
+    *,
+    spec: ModelSpec,
+    agent_name: str,
+    phase: str,
+    cost_tracker: Optional[CostTracker],
+    keys: Optional[APIKeys],
+) -> AIMessage:
+    """Attempt to invoke a fallback model when the primary fails."""
+    fallback_spec = FALLBACK_MODELS.get(spec.model_name)
+    if not fallback_spec or not keys:
+        raise ValueError(f"No fallback available for {spec.model_name}")
+
+    logger.warning(
+        f"[LLM] Falling back: {spec.model_name} → {fallback_spec.model_name}"
+    )
+    fallback_llm = create_llm(fallback_spec, keys)
+    fallback_messages = _apply_prompt_caching(messages, fallback_spec)
+    timeout = MODEL_TIMEOUTS.get(fallback_spec.model_name, 180)
+
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fallback_llm.invoke, fallback_messages)
+        response = future.result(timeout=timeout)
+
+    if cost_tracker:
+        usage = _extract_token_usage(response)
+        record = CostRecord.compute(
+            model=fallback_spec.model_name,
+            agent=f"{agent_name}_fallback",
+            phase=phase,
+            input_tokens=usage["input_tokens"],
+            output_tokens=usage["output_tokens"],
+            cached_input_tokens=usage["cached_tokens"],
+        )
+        cost_tracker.record(record)
+
+    logger.info(f"[LLM] Fallback {fallback_spec.model_name} succeeded")
+    return response

@@ -110,9 +110,18 @@ class CostTracker:
         with self._lock:
             self._records.append(rec)
             total = sum(r.cost_usd for r in self._records)
+            call_num = len(self._records)
+
+        # Structured trace for observability
+        cache_pct = (
+            f"{rec.cached_input_tokens / rec.input_tokens:.0%}"
+            if rec.input_tokens > 0 else "0%"
+        )
         logger.info(
-            f"[Cost] {rec.agent}/{rec.phase}: "
+            f"[Cost] #{call_num} {rec.agent}/{rec.phase} "
+            f"({rec.model}): "
             f"{rec.input_tokens}in/{rec.output_tokens}out "
+            f"[cache:{cache_pct}] "
             f"= ${rec.cost_usd:.4f} "
             f"(total: ${total:.4f}/{self.budget_limit:.2f})"
         )

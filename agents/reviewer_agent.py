@@ -334,11 +334,9 @@ def run_review(
     )
     analysis = response.content
 
-    # Parse verdict
-    passed = "VERDICT: PASS" in analysis.upper()
-    fix_instructions = ""
-    if not passed and "FIX_INSTRUCTIONS:" in analysis:
-        fix_instructions = analysis.split("FIX_INSTRUCTIONS:")[-1].strip()
+    # Robust verdict parsing (multiple strategies)
+    passed = _parse_verdict_robust(analysis)
+    fix_instructions = _extract_fix_instructions(analysis)
 
     # Parse verification phases
     verification = _parse_verification(analysis)
@@ -397,9 +395,60 @@ def _get_all_source_files(src_dir: Path, max_files: int = 30,
 def _parse_verification(analysis: str) -> dict:
     """Parse verification phase results from the analysis."""
     phases = {}
-    for phase in ["Build", "Imports", "Lint", "Tests", "Runtime", "Logic"]:
-        pattern = rf'{phase}:\s*(PASS|FAIL|WARN|SKIP)'
+    for phase in ["Build", "Imports", "Lint", "Tests", "Runtime", "Logic", "PRD Compliance"]:
+        pattern = rf'{phase}:\s*(PASS|FAIL|WARN|SKIP|PARTIAL)'
         match = re.search(pattern, analysis, re.IGNORECASE)
         if match:
-            phases[phase.lower()] = match.group(1).upper()
+            phases[phase.lower().replace(" ", "_")] = match.group(1).upper()
     return phases
+
+
+def _parse_verdict_robust(analysis: str) -> bool:
+    """Robust verdict parsing with multiple fallback strategies."""
+    upper = analysis.upper()
+
+    # Strategy 1: exact match
+    if "VERDICT: PASS" in upper or "VERDICT:PASS" in upper:
+        return True
+    if "VERDICT: FAIL" in upper or "VERDICT:FAIL" in upper:
+        return False
+
+    # Strategy 2: regex (handles extra whitespace/formatting)
+    verdict_match = re.search(r'VERDICT\s*[:=]\s*(PASS|FAIL)', upper)
+    if verdict_match:
+        return verdict_match.group(1) == "PASS"
+
+    # Strategy 3: look for clear pass/fail signals in last 500 chars
+    tail = upper[-500:]
+    if "OVERALL: PASS" in tail or "RESULT: PASS" in tail:
+        return True
+    if "OVERALL: FAIL" in tail or "RESULT: FAIL" in tail:
+        return False
+
+    # Strategy 4: count PASS vs FAIL mentions in verification section
+    pass_count = upper.count(": PASS")
+    fail_count = upper.count(": FAIL")
+    if pass_count > 0 or fail_count > 0:
+        return fail_count == 0
+
+    # Default: assume fail (safer)
+    logger.warning("[Reviewer] Could not parse verdict — defaulting to FAIL")
+    return False
+
+
+def _extract_fix_instructions(analysis: str) -> str:
+    """Extract fix instructions using multiple strategies."""
+    # Strategy 1: explicit label
+    for label in ["FIX_INSTRUCTIONS:", "FIX INSTRUCTIONS:", "FIXES:", "ISSUES:"]:
+        if label in analysis:
+            return analysis.split(label)[-1].strip()
+
+    # Strategy 2: look for fix instructions in a code block
+    fix_match = re.search(
+        r'(?:fix|issue|problem|error).*?(?:instruction|detail|description).*?\n(.*?)(?:```|$)',
+        analysis, re.IGNORECASE | re.DOTALL
+    )
+    if fix_match:
+        return fix_match.group(1).strip()[:2000]
+
+    return ""

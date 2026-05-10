@@ -206,6 +206,36 @@ def _generate_markdown_fallback(pitch_data: dict,
 
     all_slides = "\n".join(slides_html)
 
+    # Inject screenshot slides if available
+    screenshots_dir = workspace.output_dir / "screenshots"
+    if screenshots_dir.exists():
+        import base64
+        screenshot_files = sorted(screenshots_dir.glob("*.png"))[:3]
+        if screenshot_files:
+            screenshot_imgs = ""
+            for ss in screenshot_files:
+                try:
+                    b64 = base64.b64encode(ss.read_bytes()).decode()
+                    screenshot_imgs += (
+                        f'<img src="data:image/png;base64,{b64}" '
+                        f'style="max-width:80%;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.4);margin:10px auto;display:block">'
+                    )
+                except Exception:
+                    continue
+
+            if screenshot_imgs:
+                demo_slide = f"""
+      <section data-background="linear-gradient(135deg, #0f0c29, #302b63, #24243e)">
+        <h2 style="color:#7c3aed;margin-bottom:0.5em">🖥️ Live Demo</h2>
+        {screenshot_imgs}
+      </section>"""
+                # Insert after the 3rd content slide (Solution slide)
+                slide_list = all_slides.split("</section>")
+                insert_pos = min(3, len(slide_list) - 1)
+                slide_list.insert(insert_pos, demo_slide.rstrip("</section>"))
+                all_slides = "</section>".join(slide_list)
+                logger.info(f"[Presentation] Injected {len(screenshot_files)} screenshots into deck")
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>

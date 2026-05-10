@@ -276,6 +276,22 @@ class PipelineConfig:
     max_code_review_retries: int = 3
     budget_limit: float = float(os.getenv("PIPELINE_BUDGET_LIMIT", "10.00"))
 
+    # Phase-level budget allocation (prevents coding from being starved)
+    phase_budgets: dict[str, float] = field(default_factory=lambda: {
+        "research": 0.50,
+        "architecture": 0.50,
+        "planning": 0.30,
+        "coding": 5.00,
+        "deslopify": 0.30,
+        "readme": 0.20,
+        "self_critique": 0.20,
+        "review": 1.50,
+        "security": 0.30,
+        "deployment": 0.30,
+        "pitch": 0.50,
+        "presentation": 0.40,
+    })
+
     def get_model(self, agent_role: str) -> ModelSpec:
         """Get the model spec for a given agent role."""
         if agent_role not in self.models:
@@ -285,9 +301,15 @@ class PipelineConfig:
             )
         return self.models[agent_role]
 
+    def budget_for_phase(self, phase: str) -> float:
+        """Get the budget allocation for a specific phase.
+        Returns the phase budget or 1/12th of total if not specified."""
+        return self.phase_budgets.get(phase, self.budget_limit / 12.0)
+
 
 def load_config() -> PipelineConfig:
     """Load and return the pipeline configuration."""
     config = PipelineConfig()
     config.workspace.ensure_dirs()
     return config
+

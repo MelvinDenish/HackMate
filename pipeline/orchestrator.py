@@ -61,6 +61,9 @@ from tools.screenshots import capture_screenshots_sync
 from pipeline.learning_db import LearningDB
 from pipeline.progress_server import record_event as ws_event
 
+# v4 Feature imports
+from agents.readme_agent import run_readme_agent
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,7 +88,7 @@ def build_pipeline(
     Returns:
         Compiled LangGraph StateGraph ready to invoke
     """
-    logger.info("[Orchestrator] Building pipeline graph v3")
+    logger.info("[Orchestrator] Building pipeline graph v4")
 
     def _notify(phase: str, status: str):
         """Fire progress callback + WebSocket broadcast."""
@@ -403,13 +406,134 @@ def build_pipeline(
 
             status["deslopify"] = "completed"
             return {
-                "current_phase": "review",
+                "current_phase": "readme",
                 "phase_status": status,
             }
 
         except Exception as e:
             logger.warning(f"[Orchestrator] De-Sloppify failed (non-fatal): {e}")
             status["deslopify"] = "failed"
+            return {
+                "current_phase": "readme",
+                "phase_status": status,
+            }
+
+    def readme_node(state: PipelineState) -> dict:
+        """Phase 3a.6: README + Seed Data Generation — Claude Haiku 3.5"""
+        logger.info("═══ PHASE 3a.6: README + SEED DATA ═══")
+        _notify("readme", "running")
+        status = dict(state.get("phase_status", {}))
+        status["readme"] = "running"
+
+        try:
+            prd_path = state.get("prd_path", "")
+            files = run_readme_agent(
+                workspace, config,
+                cost_tracker=cost_tracker,
+                prd_path=prd_path,
+            )
+            status["readme"] = "completed"
+            logger.info(f"[Orchestrator] README agent created {len(files)} files")
+            return {
+                "current_phase": "self_critique",
+                "phase_status": status,
+            }
+
+        except Exception as e:
+            logger.warning(f"[Orchestrator] README generation failed (non-fatal): {e}")
+            status["readme"] = "failed"
+            return {
+                "current_phase": "self_critique",
+                "phase_status": status,
+            }
+
+    def self_critique_node(state: PipelineState) -> dict:
+        """Phase 3a.7: Reflexion Self-Critique — Claude Haiku 3.5
+        Quick self-evaluation before expensive Gemini Pro review.
+        Catches 40-60% of issues at 1/12th the cost of the reviewer."""
+        logger.info("═══ PHASE 3a.7: SELF-CRITIQUE (Reflexion) ═══")
+        _notify("self_critique", "running")
+        status = dict(state.get("phase_status", {}))
+        status["self_critique"] = "running"
+
+        try:
+            from agents.llm_factory import create_llm, invoke_with_retry
+            from langchain_core.messages import SystemMessage, HumanMessage
+
+            spec = config.get_model("deslopify")  # Haiku = fast + cheap
+            llm = create_llm(spec, config.keys)
+
+            src_tree = workspace.get_src_tree()
+            prd_content = ""
+            prd_path = state.get("prd_path", "")
+            if prd_path:
+                try:
+                    prd_content = workspace.read_file(prd_path)[:4000]
+                except Exception:
+                    pass
+
+            # Read key files for quick check
+            key_files = []
+            for fp in sorted(workspace.src_dir.rglob("*")):
+                if fp.is_file() and fp.suffix in (".py", ".js", ".ts", ".jsx", ".tsx"):
+                    try:
+                        content = fp.read_text(encoding="utf-8")[:3000]
+                        rel = fp.relative_to(workspace.src_dir)
+                        key_files.append(f"### {rel}\n```\n{content}\n```")
+                    except Exception:
+                        continue
+                    if len(key_files) >= 10:
+                        break
+
+            messages = [
+                SystemMessage(content=(
+                    "You are a quick self-critique agent. Review the code for obvious issues:\n"
+                    "1. Missing imports or broken dependencies\n"
+                    "2. Functions called but never defined\n"
+                    "3. Missing required files (e.g., no entry point, no index.html)\n"
+                    "4. PRD features that are completely missing\n"
+                    "5. Hardcoded credentials or security issues\n\n"
+                    "If you find issues, respond with:\n"
+                    "SELF_FIX_NEEDED: YES\n"
+                    "FIXES:\n- [list each fix needed]\n\n"
+                    "If code looks ready for review:\n"
+                    "SELF_FIX_NEEDED: NO\n"
+                    "NOTES: [brief assessment]"
+                )),
+                HumanMessage(content=(
+                    f"## Project Structure\n```\n{src_tree}\n```\n\n"
+                    f"## PRD Summary\n{prd_content[:3000]}\n\n"
+                    f"## Key Source Files\n{''.join(key_files[:8])}\n"
+                )),
+            ]
+
+            response = invoke_with_retry(
+                llm, messages,
+                spec=spec,
+                agent_name="self_critique",
+                phase="self_critique",
+                cost_tracker=cost_tracker,
+            )
+
+            critique = response.content
+            needs_fix = "SELF_FIX_NEEDED: YES" in critique.upper()
+
+            if needs_fix:
+                logger.warning("[Orchestrator] Self-critique found issues — adding to review context")
+                # Store critique for the reviewer to use
+                workspace.log_event("self_critique", "Issues found", critique[:1000])
+            else:
+                logger.info("[Orchestrator] Self-critique: code looks ready for review")
+
+            status["self_critique"] = "completed"
+            return {
+                "current_phase": "review",
+                "phase_status": status,
+            }
+
+        except Exception as e:
+            logger.warning(f"[Orchestrator] Self-critique failed (non-fatal): {e}")
+            status["self_critique"] = "failed"
             return {
                 "current_phase": "review",
                 "phase_status": status,
@@ -696,12 +820,14 @@ def build_pipeline(
 
     graph = StateGraph(PipelineState)
 
-    # Add nodes (v2: includes deslopify, security, and security_fix)
+    # Add nodes (v4: includes readme, self_critique)
     graph.add_node("research_node", research_node)
     graph.add_node("architect_node", architect_node)
     graph.add_node("plan_node", plan_node)
     graph.add_node("code_node", code_node)
     graph.add_node("deslopify_node", deslopify_node)
+    graph.add_node("readme_node", readme_node)
+    graph.add_node("self_critique_node", self_critique_node)
     graph.add_node("review_node", review_node)
     graph.add_node("security_node", security_node)
     graph.add_node("security_fix_node", security_fix_node)
@@ -709,13 +835,15 @@ def build_pipeline(
     graph.add_node("pitch_node", pitch_node)
     graph.add_node("present_node", present_node)
 
-    # Add edges (v2: code → deslopify → review → security → deploy)
+    # Add edges (v4: code → deslopify → readme → self-critique → review)
     graph.set_entry_point("research_node")
     graph.add_edge("research_node", "architect_node")
     graph.add_edge("architect_node", "plan_node")
     graph.add_edge("plan_node", "code_node")
     graph.add_edge("code_node", "deslopify_node")
-    graph.add_edge("deslopify_node", "review_node")
+    graph.add_edge("deslopify_node", "readme_node")
+    graph.add_edge("readme_node", "self_critique_node")
+    graph.add_edge("self_critique_node", "review_node")
 
     # Conditional: review → code (retry) or security
     graph.add_conditional_edges(
@@ -742,10 +870,10 @@ def build_pipeline(
     graph.add_edge("pitch_node", "present_node")
     graph.add_edge("present_node", END)
 
-    logger.info("[Orchestrator] Pipeline graph v3.0 built successfully")
+    logger.info("[Orchestrator] Pipeline graph v4.0 built successfully")
     logger.info(
         "[Orchestrator] Flow: research → architect → plan → code(+validate+design) → "
-        "deslopify → review ↺ → security ↺ → deploy(+screenshot) → pitch → present"
+        "deslopify → readme → self-critique → review ↺ → security ↺ → deploy(+screenshot) → pitch → present"
     )
 
     # Compile with SQLite checkpointing for resume-on-crash

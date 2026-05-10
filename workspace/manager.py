@@ -34,6 +34,8 @@ class WorkspaceManager:
 
     def __init__(self, root: Path):
         self.root = Path(root)
+        self._src_tree_cache: str = ""
+        self._tree_dirty: bool = True
         self._ensure_structure()
 
     def _ensure_structure(self) -> None:
@@ -133,6 +135,7 @@ class WorkspaceManager:
         file_path = self.src_dir / relative_path
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content, encoding="utf-8")
+        self._tree_dirty = True  # Invalidate cached tree
         logger.info(f"[Workspace] Source: {relative_path}")
         return file_path
 
@@ -147,7 +150,12 @@ class WorkspaceManager:
         """
         Generate a text representation of the src/ directory tree.
         Shows proper directory hierarchy with tree characters.
+        Uses incremental caching — only rebuilds when files change.
         """
+        # Return cache if still valid
+        if not self._tree_dirty and self._src_tree_cache:
+            return self._src_tree_cache
+
         src = self.src_dir
         if not src.exists():
             return "(empty)"
@@ -189,7 +197,11 @@ class WorkspaceManager:
                     indent = "  " * (len(parts) - 1)
                     lines.append(f"{indent}📁 {parts[-1]}/")
 
-        return "\n".join(lines) if lines else "(empty)"
+        result = "\n".join(lines) if lines else "(empty)"
+        # Cache the result
+        self._src_tree_cache = result
+        self._tree_dirty = False
+        return result
 
     def log_event(self, phase: str, event: str, details: str = "") -> None:
         """Log a pipeline event to the workspace logs (both flat text and JSONL)."""

@@ -24,6 +24,7 @@ files = [
     "agents/clarification_agent.py",
     "agents/knowledge_base.py",
     "agents/deployer_agent.py",
+    "agents/readme_agent.py",
     "tools/exa_search.py",
     "tools/sandbox.py",
     "tools/web_search.py",

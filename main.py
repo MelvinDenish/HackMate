@@ -69,18 +69,20 @@ def display_banner():
     """Display the startup banner."""
     banner = """
 [bold cyan]╔═══════════════════════════════════════════════════════════╗[/]
-[bold cyan]║[/]  [bold white]🚀 HACKATHON AUTOMATION PIPELINE v2[/]                      [bold cyan]║[/]
+[bold cyan]║[/]  [bold white]🚀 HACKATHON AUTOMATION PIPELINE v4[/]                      [bold cyan]║[/]
 [bold cyan]║[/]  [dim]End-to-End Autonomous Multi-Agent System[/]               [bold cyan]║[/]
 [bold cyan]╠═══════════════════════════════════════════════════════════╣[/]
 [bold cyan]║[/]  [bold magenta]Anthropic[/] Claude Sonnet 4  │ Architect, Coder, Pitch,   [bold cyan]║[/]
 [bold cyan]║[/]                           │ Security Review            [bold cyan]║[/]
-[bold cyan]║[/]  [bold magenta]Anthropic[/] Claude Haiku    │ Deployer, De-Sloppify      [bold cyan]║[/]
+[bold cyan]║[/]  [bold magenta]Anthropic[/] Claude Haiku    │ Deploy, Polish, README,    [bold cyan]║[/]
+[bold cyan]║[/]                           │ Self-Critique              [bold cyan]║[/]
 [bold cyan]║[/]  [bold blue]Google[/] Gemini 2.5 Flash   │ Research, Knowledge Base   [bold cyan]║[/]
-[bold cyan]║[/]  [bold blue]Google[/] Gemini 2.5 Pro     │ Code Reviewer (6-Phase)    [bold cyan]║[/]
+[bold cyan]║[/]  [bold blue]Google[/] Gemini 2.5 Pro     │ Code Reviewer (7-Phase)    [bold cyan]║[/]
 [bold cyan]║[/]  [bold green]Moonshot[/] Kimi k2          │ Presentation Design        [bold cyan]║[/]
 [bold cyan]╠═══════════════════════════════════════════════════════════╣[/]
-[bold cyan]║[/]  [dim]New: Cost Tracking ∙ Budget Guards ∙ Security Scan[/]     [bold cyan]║[/]
-[bold cyan]║[/]  [dim]New: De-Sloppify Pass ∙ 6-Phase Verification Loop[/]     [bold cyan]║[/]
+[bold cyan]║[/]  [dim]Prompt Caching • Circuit Breaker • Model Fallback[/]     [bold cyan]║[/]
+[bold cyan]║[/]  [dim]Reflexion Self-Critique • README Agent • Learning DB[/]  [bold cyan]║[/]
+[bold cyan]║[/]  [dim]Design System Injection • WebSocket Dashboard[/]        [bold cyan]║[/]
 [bold cyan]╚═══════════════════════════════════════════════════════════╝[/]
 """
     console.print(banner)
@@ -244,7 +246,7 @@ def display_results(final_state: dict, cost_tracker: CostTracker = None):
     """Display the final pipeline results."""
     console.print("\n")
     console.print(Panel(
-        "[bold green]🎉 PIPELINE v2 COMPLETE[/]",
+        "[bold green]🎉 PIPELINE v4 COMPLETE[/]",
         border_style="green",
     ))
 
@@ -313,7 +315,7 @@ def display_results(final_state: dict, cost_tracker: CostTracker = None):
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="🚀 Hackathon Automation Pipeline v2 — "
+        description="🚀 Hackathon Automation Pipeline v4 — "
                     "End-to-End Autonomous Multi-Agent System",
     )
     parser.add_argument(
@@ -407,8 +409,8 @@ def main():
 
     # Run the autonomous pipeline
     console.print(Panel(
-        "[bold]Starting autonomous pipeline v2 execution...[/]\n"
-        "[dim]Flow: Research → Architect → Plan → Code → De-Sloppify → Review ↺ → Security → Deploy → Pitch → Present[/]",
+        "[bold]Starting autonomous pipeline v4 execution...[/]\n"
+        "[dim]Flow: Research → Architect → Plan → Code → Polish → README → Self-Critique → Review ↺ → Security → Deploy → Pitch → Present[/]",
         title="🤖 Autonomous Execution",
         border_style="magenta",
     ))
