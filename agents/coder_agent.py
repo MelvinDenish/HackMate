@@ -406,20 +406,40 @@ def execute_with_parallel_drafts(
 ) -> list[str]:
     """Generate 2 parallel drafts for a task and pick the best one.
 
-    Uses ThreadPoolExecutor to run both drafts concurrently.
-    Selects the draft with fewer syntax errors (from _quick_validate).
-    Falls back to single-draft if parallel execution fails.
-
-    Research: SWE-bench Pro 2025 shows parallel drafts yield
-    15-25% higher first-pass rates for UI/styling tasks.
+    v5 FIX #10: Uses isolated temp directories to prevent race condition.
+    Each draft writes to its own temp dir, then the winner is copied to workspace.
     """
     import concurrent.futures
+    import shutil
+    import tempfile
 
     logger.info(f"[Coder] Task {task.get('id')}: Using speculative parallel drafts (frontend)")
 
-    def _generate_draft(draft_num: int) -> tuple[list[str], list[str]]:
-        """Generate one draft and return (files_created, syntax_errors)."""
-        # Add slight variation to encourage different approaches
+    # Create isolated temp workspaces for each draft
+    tmp_base = workspace.src_dir.parent / ".draft_tmp"
+    tmp_base.mkdir(exist_ok=True)
+    draft_a_dir = tmp_base / "draft_a"
+    draft_b_dir = tmp_base / "draft_b"
+
+    # Clean previous drafts
+    for d in [draft_a_dir, draft_b_dir]:
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True)
+
+    def _isolated_write(draft_dir: Path):
+        """Returns a write function that targets the draft dir instead of real workspace."""
+        def write_fn(relative_path: str, content: str) -> Path:
+            file_path = draft_dir / relative_path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content, encoding="utf-8")
+            return file_path
+        return write_fn
+
+    def _generate_draft(draft_num: int, draft_dir: Path) -> tuple[list[str], list[str]]:
+        """Generate one draft into an isolated directory."""
+        from utils.file_parser import parse_file_blocks, write_parsed_files
+
         variant_task = dict(task)
         if draft_num == 2:
             desc = variant_task.get("description", "")
@@ -428,36 +448,66 @@ def execute_with_parallel_drafts(
                 "clear separation of concerns. Use modern CSS patterns."
             )
 
-        files = execute_task(
-            variant_task, prd_content, src_tree, workspace, config,
-            cost_tracker=cost_tracker,
-            all_tasks=all_tasks,
+        spec = config.get_model("coder")
+        llm = create_llm(spec, config.keys)
+
+        from langchain_core.messages import SystemMessage, HumanMessage
+        task_spec = (
+            f"## Task: {variant_task.get('title', '')}\\n"
+            f"**ID**: {variant_task.get('id', '')}\\n"
+            f"### Description\\n{variant_task.get('description', '')}\\n"
         )
+        context = (
+            f"## Current Project Structure\\n```\\n{src_tree}\\n```\\n\\n"
+            f"## PRD (excerpt)\\n{prd_content[:8000]}\\n\\n"
+            f"## Your Task\\n{task_spec}"
+        )
+        messages = [
+            SystemMessage(content=CODER_SYSTEM_PROMPT),
+            HumanMessage(content=context),
+        ]
+        response = invoke_with_retry(
+            llm, messages, spec=spec, agent_name=f"coder_draft{draft_num}",
+            phase="coding", cost_tracker=cost_tracker,
+        )
+        parsed = parse_file_blocks(response.content)
+        files = write_parsed_files(parsed, _isolated_write(draft_dir), label=f"Draft{draft_num}")
         errors = _quick_validate(files)
         return files, errors
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_a = executor.submit(_generate_draft, 1)
-            future_b = executor.submit(_generate_draft, 2)
+            future_a = executor.submit(_generate_draft, 1, draft_a_dir)
+            future_b = executor.submit(_generate_draft, 2, draft_b_dir)
 
             files_a, errors_a = future_a.result(timeout=300)
             files_b, errors_b = future_b.result(timeout=300)
 
         # Pick the draft with fewer errors
         if len(errors_a) <= len(errors_b):
-            logger.info(
-                f"[Coder] Draft A selected: {len(errors_a)} errors vs Draft B: {len(errors_b)} errors"
-            )
-            return files_a
+            winner_dir = draft_a_dir
+            logger.info(f"[Coder] Draft A selected: {len(errors_a)} errors vs Draft B: {len(errors_b)}")
         else:
-            logger.info(
-                f"[Coder] Draft B selected: {len(errors_b)} errors vs Draft A: {len(errors_a)} errors"
-            )
-            return files_b
+            winner_dir = draft_b_dir
+            logger.info(f"[Coder] Draft B selected: {len(errors_b)} errors vs Draft A: {len(errors_a)}")
+
+        # Copy winner files to real workspace
+        final_files = []
+        for fp in winner_dir.rglob("*"):
+            if fp.is_file():
+                rel = fp.relative_to(winner_dir)
+                real_path = workspace.write_source_file(str(rel), fp.read_text(encoding="utf-8"))
+                final_files.append(str(real_path))
+
+        # Cleanup temp dirs
+        shutil.rmtree(tmp_base, ignore_errors=True)
+        return final_files
 
     except Exception as e:
         logger.warning(f"[Coder] Parallel drafts failed, falling back to single: {e}")
+        # Cleanup
+        import shutil
+        shutil.rmtree(tmp_base, ignore_errors=True)
         return execute_task(
             task, prd_content, src_tree, workspace, config,
             cost_tracker=cost_tracker,

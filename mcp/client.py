@@ -1,16 +1,15 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║  MCP CLIENT — Model Context Protocol Integration             ║
+║  WORKSPACE TOOL SERVER — Agent Tool Registry                  ║
 ║                                                              ║
-║  Connects HackMate agents to external tools via MCP:         ║
-║  • Railway (deployment)                                      ║
-║  • Context7 (documentation lookup)                           ║
-║  • Exa (web search)                                          ║
-║  • Sequential Thinking (reasoning)                           ║
-║  • Custom workspace server (file + build tools)              ║
+║  Provides two components:                                    ║
+║  1. MCPRegistry: Reads .mcp.json for external tool config    ║
+║  2. MCPWorkspaceServer: In-process tool server exposing:     ║
+║     read_file, list_files, get_source_tree, run_command      ║
 ║                                                              ║
-║  MCP is the "USB-C for AI agents" — standardized protocol    ║
-║  for connecting LLMs to external tools and data sources.     ║
+║  NOTE: MCPWorkspaceServer is NOT a real MCP JSON-RPC server. ║
+║  It's a simplified in-process tool interface used by agents.  ║
+║  For full MCP compliance, use the official MCP SDK.           ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 

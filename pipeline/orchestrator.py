@@ -99,7 +99,18 @@ def build_pipeline(
     Returns:
         Compiled LangGraph StateGraph ready to invoke
     """
-    logger.info("[Orchestrator] Building pipeline graph v4")
+    logger.info("[Orchestrator] Building pipeline graph v5")
+
+    # v5 FIX #8: Register A/B prompt variants for key agents
+    ab_registry = get_ab_registry()
+    ab_registry.register_variant("coder", "default", "Generate clean, production-quality code")
+    ab_registry.register_variant("coder", "modular", "Generate highly modular code with small, focused functions")
+    ab_registry.register_variant("coder", "defensive", "Generate defensive code with extensive error handling")
+    ab_registry.register_variant("reviewer", "strict", "Be strict — fail on any missing feature or code smell")
+    ab_registry.register_variant("reviewer", "pragmatic", "Be pragmatic — only fail on runtime errors and crashes")
+
+    # v5 FIX #9: Create approval gate (respects HACKMATE_APPROVAL_MODE env var)
+    gate = create_gate()
 
     def _notify(phase: str, status: str):
         """Fire progress callback + WebSocket broadcast."""
@@ -204,6 +215,18 @@ def build_pipeline(
                     logger.info("[Orchestrator] PRD ingested into Knowledge Base")
             except Exception as e:
                 logger.warning(f"[Orchestrator] KB PRD ingestion failed (non-fatal): {e}")
+
+            # v5 FIX #9: Approval gate after architecture
+            try:
+                approved = gate.request_approval(
+                    phase="architecture",
+                    summary=f"PRD generated at {prd_path}",
+                    details="Architecture phase complete. Review PRD before coding begins.",
+                )
+                if not approved:
+                    logger.warning("[Orchestrator] Architecture NOT approved — proceeding anyway (hackathon mode)")
+            except Exception as e:
+                logger.debug(f"[Orchestrator] Approval gate skipped: {e}")
 
             return {
                 "prd_path": prd_path,
@@ -419,6 +442,17 @@ def build_pipeline(
                     logger.info(f"[Orchestrator] 🌐 Live preview: {preview_url}")
             except Exception as e:
                 logger.warning(f"[Orchestrator] Dev server start failed (non-fatal): {e}")
+
+            # v5 FIX #6: Redistribute unspent budget to remaining phases
+            if cost_tracker:
+                try:
+                    coding_budget = config.phase_budgets.get("coding", 5.0)
+                    config.phase_budgets.update(
+                        cost_tracker.redistribute_savings("coding", coding_budget, config.phase_budgets)
+                    )
+                    logger.info("[Orchestrator] Budget savings redistributed after coding")
+                except Exception:
+                    pass
 
             status["coding"] = "completed"
             return {
@@ -800,19 +834,19 @@ def build_pipeline(
             return "code_node"
 
     def security_router(state: PipelineState) -> Literal[
-        "security_fix_node", "deploy_node"
+        "security_fix_node", "cicd_node"
     ]:
         """
         Route after security review:
         - FAIL with critical issues → security_fix_node (fix then redeploy)
-        - PASS or WARN → deploy_node
+        - PASS or WARN → cicd_node (proceed to CI/CD)
         """
         verdict = state.get("security_verdict", "PASS")
         if verdict == "FAIL":
             logger.info("[Orchestrator] Security FAILED → attempting auto-fix")
             return "security_fix_node"
-        logger.info(f"[Orchestrator] Security {verdict} → deploy")
-        return "deploy_node"
+        logger.info(f"[Orchestrator] Security {verdict} → CI/CD")
+        return "cicd_node"
 
     def security_fix_node(state: PipelineState) -> dict:
         """Auto-fix critical security issues by feeding findings back to coder."""
@@ -878,6 +912,18 @@ def build_pipeline(
                 cost_tracker=cost_tracker,
             )
 
+            # v5 FIX: Actually RUN the generated tests
+            test_results = {}
+            if test_files:
+                try:
+                    test_results = run_tests(workspace.src_dir, timeout=30)
+                    if test_results.get("passed"):
+                        logger.info(f"[Orchestrator] Tests PASSED: {test_results.get('summary', '')}")
+                    else:
+                        logger.warning(f"[Orchestrator] Tests FAILED: {test_results.get('summary', '')}")
+                except Exception as te:
+                    logger.warning(f"[Orchestrator] Test execution failed: {te}")
+
             # Run runtime trace to catch startup errors
             runtime = trace_runtime(workspace.src_dir, timeout=10)
             runtime_facts = format_runtime_facts(runtime)
@@ -885,9 +931,17 @@ def build_pipeline(
             if runtime.get("errors"):
                 logger.warning(f"[Orchestrator] Runtime issues: {len(runtime['errors'])} errors")
 
+            # v5 FIX: Redistribute budget savings after testing phase
+            if cost_tracker:
+                try:
+                    cost_tracker.redistribute_savings(config.phase_budgets)
+                except Exception:
+                    pass
+
             status["testing"] = "completed"
             return {
                 "test_files": test_files,
+                "test_results": test_results,
                 "runtime_trace": runtime_facts,
                 "current_phase": "readme",
                 "phase_status": status,
@@ -950,23 +1004,29 @@ def build_pipeline(
 
     graph = StateGraph(PipelineState)
 
-    # Add nodes (v5: includes test, cicd, seed nodes)
-    graph.add_node("research_node", research_node)
-    graph.add_node("architect_node", architect_node)
-    graph.add_node("plan_node", plan_node)
-    graph.add_node("code_node", code_node)
-    graph.add_node("deslopify_node", deslopify_node)
-    graph.add_node("test_node", test_node)          # v5: TDD
-    graph.add_node("readme_node", readme_node)
-    graph.add_node("self_critique_node", self_critique_node)
-    graph.add_node("review_node", review_node)
-    graph.add_node("security_node", security_node)
-    graph.add_node("security_fix_node", security_fix_node)
-    graph.add_node("cicd_node", cicd_node)           # v5: CI/CD
-    graph.add_node("seed_node", seed_node)            # v5: Demo seeding
-    graph.add_node("deploy_node", deploy_node)
-    graph.add_node("pitch_node", pitch_node)
-    graph.add_node("present_node", present_node)
+    # v5 FIX #4: Wrap all nodes with tracing decorator
+    _traced_nodes = {
+        "research_node": trace_agent("research", "research")(research_node),
+        "architect_node": trace_agent("architect", "architecture")(architect_node),
+        "plan_node": trace_agent("planner", "planning")(plan_node),
+        "code_node": trace_agent("coder", "coding")(code_node),
+        "deslopify_node": trace_agent("deslopify", "deslopify")(deslopify_node),
+        "test_node": trace_agent("test_writer", "testing")(test_node),
+        "readme_node": trace_agent("readme", "readme")(readme_node),
+        "self_critique_node": trace_agent("self_critique", "self_critique")(self_critique_node),
+        "review_node": trace_agent("reviewer", "review")(review_node),
+        "security_node": trace_agent("security", "security")(security_node),
+        "security_fix_node": trace_agent("security_fix", "security_fix")(security_fix_node),
+        "cicd_node": trace_agent("cicd", "cicd")(cicd_node),
+        "seed_node": trace_agent("seed", "seeding")(seed_node),
+        "deploy_node": trace_agent("deployer", "deployment")(deploy_node),
+        "pitch_node": trace_agent("pitch", "pitch")(pitch_node),
+        "present_node": trace_agent("presentation", "presentation")(present_node),
+    }
+
+    # Add nodes (v5: all traced + test, cicd, seed nodes)
+    for node_name, node_fn in _traced_nodes.items():
+        graph.add_node(node_name, node_fn)
 
     # Add edges (v5: code → deslopify → test → readme → self-critique → review)
     graph.set_entry_point("research_node")
@@ -995,7 +1055,7 @@ def build_pipeline(
         security_router,
         {
             "security_fix_node": "security_fix_node",
-            "deploy_node": "cicd_node",         # v5: security → cicd before deploy
+            "cicd_node": "cicd_node",              # v5 FIX: direct mapping
         },
     )
     graph.add_edge("security_fix_node", "cicd_node")  # v5: fix → cicd

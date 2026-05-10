@@ -215,32 +215,29 @@ def _upload_source_to_railway(
     api_token: str, project_id: str, src_dir: Path
 ) -> str:
     """
-    Upload source code to Railway via the serviceInstanceDeploy mutation.
-    Uses the CLI upload endpoint for code push without git.
+    Upload source code to Railway via service creation + source upload.
+    Creates a tarball of the src directory and uploads via Railway API.
     """
     import tarfile
     import io
-    import base64
 
     # Create tarball of src directory
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for fp in src_dir.rglob("*"):
             if fp.is_file():
-                # Skip node_modules, __pycache__, .git
                 if any(p in str(fp) for p in ["node_modules", "__pycache__", ".git"]):
                     continue
                 tar.add(str(fp), arcname=str(fp.relative_to(src_dir)))
     buf.seek(0)
     tarball_bytes = buf.getvalue()
 
-    # Step 1: Get an upload URL via Railway API
     headers = {
         "Authorization": f"Bearer {api_token}",
         "Content-Type": "application/json",
     }
 
-    # Create a service in the project
+    # Step 1: Create a service in the project
     create_service_query = """
     mutation serviceCreate($input: ServiceCreateInput!) {
         serviceCreate(input: $input) {
@@ -266,6 +263,31 @@ def _upload_source_to_railway(
         return ""
 
     logger.info(f"[Deployer] Service created: {service_id}")
+
+    # Step 2: Upload tarball to Railway's upload endpoint
+    try:
+        upload_headers = {
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/gzip",
+        }
+        upload_url = f"https://backboard.railway.com/project/{project_id}/service/{service_id}/upload"
+        with httpx.Client(timeout=120) as client:
+            upload_resp = client.post(
+                upload_url,
+                content=tarball_bytes,
+                headers=upload_headers,
+            )
+            if upload_resp.status_code < 400:
+                logger.info(f"[Deployer] Source uploaded ({len(tarball_bytes)} bytes)")
+            else:
+                logger.warning(
+                    f"[Deployer] Upload returned {upload_resp.status_code} — "
+                    f"deployment may require manual git push. "
+                    f"Service ID: {service_id}"
+                )
+    except Exception as e:
+        logger.warning(f"[Deployer] Upload failed (service created but code not pushed): {e}")
+
     return service_id
 
 

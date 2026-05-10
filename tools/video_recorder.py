@@ -1,12 +1,13 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║  VIDEO RECORDER — Auto-Generate Demo Videos                  ║
+║  DEMO STORYBOARD — Auto-Generate Demo Walkthroughs           ║
 ║                                                              ║
-║  Captures screenshots at key demo steps and stitches them    ║
-║  into an annotated walkthrough video/GIF.                    ║
+║  Generates markdown storyboards and interactive HTML          ║
+║  slideshows from screenshots + demo step descriptions.       ║
 ║                                                              ║
-║  Lightweight approach: uses existing screenshot tool +        ║
-║  PIL for image stitching (no Playwright required).            ║
+║  Output formats:                                             ║
+║  - DEMO_STORYBOARD.md: Markdown with embedded screenshots    ║
+║  - demo_walkthrough.html: Interactive HTML slideshow          ║
 ║                                                              ║
 ║  Covers 15% of hackathon judging rubric (Presentation).      ║
 ╚══════════════════════════════════════════════════════════════╝

@@ -393,6 +393,7 @@ def invoke_with_retry(
     cached_messages = _apply_prompt_caching(messages, spec)
 
     for attempt in range(max_retries):
+        call_start = time.time()
         try:
             # Timeout guard: use threading to prevent infinite hangs
             import concurrent.futures
@@ -405,6 +406,9 @@ def invoke_with_retry(
                         f"LLM call to {spec.model_name} timed out after {timeout}s"
                     )
 
+            call_latency = time.time() - call_start
+            call_cost = 0.0
+
             # Track cost
             if cost_tracker is not None:
                 usage = _extract_token_usage(response)
@@ -416,11 +420,13 @@ def invoke_with_retry(
                     output_tokens=usage["output_tokens"],
                     cached_input_tokens=usage["cached_tokens"],
                 )
+                call_cost = record.cost_usd
                 cost_tracker.record(record)  # Raises BudgetExceededError if over
 
-            # Record success for circuit breaker
+            # Record success for circuit breaker + health tracker
             if breaker:
                 breaker.record_success()
+            _health_tracker.record_call(spec.provider, call_latency, True, call_cost)
 
             return response
 
@@ -431,9 +437,10 @@ def invoke_with_retry(
             if "BudgetExceeded" in type(e).__name__:
                 raise
 
-            # Record failure for circuit breaker
+            # Record failure for circuit breaker + health tracker
             if breaker:
                 breaker.record_failure()
+            _health_tracker.record_call(spec.provider, time.time() - call_start, False)
 
             if _is_retryable(e) and attempt < max_retries - 1:
                 wait = 2 ** attempt  # 1s, 2s, 4s
