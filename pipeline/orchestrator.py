@@ -63,6 +63,7 @@ from pipeline.progress_server import record_event as ws_event
 
 # v4 Feature imports
 from agents.readme_agent import run_readme_agent
+from pipeline.context_utils import compact_src_tree, compact_review_notes
 
 logger = logging.getLogger(__name__)
 
@@ -313,8 +314,16 @@ def build_pipeline(
                 prd_content = workspace.read_file(prd_path)
                 src_tree = workspace.get_src_tree()
 
+                # v4: Compact context to prevent token bloat on revisions
+                compacted_notes = compact_review_notes(review_notes)
+                compacted_tree = compact_src_tree(src_tree)
+                logger.info(
+                    f"[Orchestrator] Context compaction: notes {len(review_notes)}→{len(compacted_notes)}, "
+                    f"tree {len(src_tree)}→{len(compacted_tree)} chars"
+                )
+
                 revision_context = (
-                    f"## Previous Test Results\n{review_notes}\n\n"
+                    f"## Previous Test Results\n{compacted_notes}\n\n"
                     f"## Fix Instructions\n{fix_instructions}"
                 )
 
@@ -910,7 +919,7 @@ def run_pipeline(
         Final pipeline state with all outputs
     """
     logger.info("╔══════════════════════════════════════════════╗")
-    logger.info("║  HACKATHON PIPELINE v3 — STARTING EXECUTION  ║")
+    logger.info("║  HACKATHON PIPELINE v4 — STARTING EXECUTION  ║")
     logger.info("╚══════════════════════════════════════════════╝")
 
     run_start = time.time()
@@ -929,17 +938,52 @@ def run_pipeline(
         progress_callback=progress_callback,
     )
 
-    # Execute the graph with thread_id for checkpoint resumption
+    # v4: Hot-reload config before execution
+    try:
+        if config.reload_keys():
+            logger.info("[Orchestrator] Config hot-reloaded before execution")
+    except Exception:
+        pass
+
+    # Execute the graph with streaming for real-time progress
     import uuid
     thread_id = str(uuid.uuid4())[:8]
+    final_state = None
+
     try:
-        final_state = pipeline.invoke(
-            initial_state,
-            config={"configurable": {"thread_id": thread_id}},
-        )
-    except TypeError:
-        # Fallback: checkpointing not available, run without config
-        final_state = pipeline.invoke(initial_state)
+        # v4: Use stream() for real-time node-by-node progress
+        run_config = {"configurable": {"thread_id": thread_id}}
+        for event in pipeline.stream(initial_state, config=run_config, stream_mode="updates"):
+            # Each event is {node_name: state_delta}
+            for node_name, state_delta in event.items():
+                phase = state_delta.get("current_phase", node_name.replace("_node", ""))
+                status = state_delta.get("phase_status", {}).get(phase, "running")
+                logger.info(f"[Stream] Node completed: {node_name} → phase={phase}")
+
+                # Hot-reload config between major phases
+                try:
+                    config.reload_keys()
+                except Exception:
+                    pass
+
+                # Track the latest state
+                if final_state is None:
+                    final_state = dict(initial_state)
+                final_state.update(state_delta)
+
+        if final_state is None:
+            final_state = initial_state
+
+    except (TypeError, AttributeError) as e:
+        # Fallback: streaming not available, use invoke()
+        logger.info(f"[Orchestrator] Streaming not available ({e}), using invoke()")
+        try:
+            final_state = pipeline.invoke(
+                initial_state,
+                config={"configurable": {"thread_id": thread_id}},
+            )
+        except TypeError:
+            final_state = pipeline.invoke(initial_state)
 
     run_duration = time.time() - run_start
 

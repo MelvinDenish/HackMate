@@ -11,6 +11,7 @@ files = [
     "pipeline/schemas.py",
     "pipeline/learning_db.py",
     "pipeline/progress_server.py",
+    "pipeline/context_utils.py",
     "agents/llm_factory.py",
     "agents/deslopify_agent.py",
     "agents/security_agent.py",

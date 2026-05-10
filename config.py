@@ -306,10 +306,42 @@ class PipelineConfig:
         Returns the phase budget or 1/12th of total if not specified."""
         return self.phase_budgets.get(phase, self.budget_limit / 12.0)
 
+    def reload_keys(self) -> bool:
+        """Hot-reload API keys from .env without restarting.
+        Useful when keys are added/changed mid-run.
+        Returns True if any keys changed."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        old_keys = self.keys
+        load_dotenv(override=True)
+        new_keys = APIKeys.from_env()
+
+        changed = False
+        for field_name in ("anthropic", "google", "moonshot", "exa", "gamma", "railway"):
+            old_val = getattr(old_keys, field_name, None)
+            new_val = getattr(new_keys, field_name, None)
+            if old_val != new_val and new_val:
+                changed = True
+                logger.info(f"[Config] Hot-reloaded key: {field_name}")
+
+        if changed:
+            # Replace the keys (PipelineConfig is not frozen)
+            object.__setattr__(self, "keys", new_keys)
+            logger.info("[Config] API keys hot-reloaded from .env")
+
+        # Also reload budget limit
+        new_budget = float(os.getenv("PIPELINE_BUDGET_LIMIT", "10.00"))
+        if new_budget != self.budget_limit:
+            object.__setattr__(self, "budget_limit", new_budget)
+            logger.info(f"[Config] Budget limit updated: ${new_budget:.2f}")
+            changed = True
+
+        return changed
+
 
 def load_config() -> PipelineConfig:
     """Load and return the pipeline configuration."""
     config = PipelineConfig()
     config.workspace.ensure_dirs()
     return config
-
