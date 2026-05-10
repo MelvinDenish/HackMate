@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -265,6 +266,38 @@ def execute_task(
     parsed = parse_file_blocks(raw_output)
     files_created = write_parsed_files(parsed, workspace.write_source_file, label="Coder")
 
+    # ── Quick-Validate Inner Loop (Devin pattern) ──────────────
+    # Immediately check generated files for syntax errors.
+    # If any fail, retry the task with the error — saves a full review cycle.
+    syntax_errors = _quick_validate(files_created)
+    if syntax_errors and not revision_context:
+        # Only retry once to avoid infinite loops
+        logger.warning(
+            f"[Coder] Task {task_id}: {len(syntax_errors)} syntax errors detected. "
+            f"Retrying with corrections..."
+        )
+        correction_prompt = (
+            f"Your previous code has syntax errors. Fix ONLY these errors:\n\n"
+            + "\n".join(f"- {e}" for e in syntax_errors)
+            + "\n\nRegenerate the affected files with the ```file:path``` format."
+        )
+        correction_messages = [
+            SystemMessage(content=CODER_SYSTEM_PROMPT),
+            HumanMessage(content=context + f"\n\n## SYNTAX FIX REQUIRED\n{correction_prompt}"),
+        ]
+        retry_response = invoke_with_retry(
+            llm, correction_messages,
+            spec=spec, agent_name="coder", phase="coding_fix",
+            cost_tracker=cost_tracker,
+        )
+        retry_parsed = parse_file_blocks(retry_response.content)
+        if retry_parsed:
+            retry_files = write_parsed_files(retry_parsed, workspace.write_source_file, label="Coder-Fix")
+            # Merge: replace fixed files in our list
+            fixed_paths = set(retry_files)
+            files_created = [f for f in files_created if f not in fixed_paths] + retry_files
+            logger.info(f"[Coder] Task {task_id}: self-correction fixed {len(retry_files)} files")
+
     # Validate: warn if fewer files than expected
     expected = task.get("estimated_files", [])
     if expected and len(files_created) < len(expected):
@@ -275,6 +308,37 @@ def execute_task(
 
     logger.info(f"[Coder] Task {task_id}: created {len(files_created)} files")
     return files_created
+
+
+def _quick_validate(file_paths: list[str]) -> list[str]:
+    """Quick syntax validation of generated files. Returns list of error strings.
+    Only checks Python and JS — fast, no external tools needed."""
+    errors = []
+    for fp in file_paths:
+        try:
+            path = Path(fp) if not isinstance(fp, Path) else fp
+            if not path.exists():
+                continue
+
+            content = path.read_text(encoding="utf-8")
+
+            if path.suffix == ".py":
+                try:
+                    compile(content, str(path), "exec")
+                except SyntaxError as e:
+                    errors.append(f"{path.name}:{e.lineno}: {e.msg}")
+
+            elif path.suffix in (".js", ".ts", ".jsx", ".tsx"):
+                # Quick brace/bracket balance check
+                if content.count("{") != content.count("}"):
+                    errors.append(f"{path.name}: mismatched curly braces")
+                if content.count("(") != content.count(")"):
+                    errors.append(f"{path.name}: mismatched parentheses")
+
+        except Exception:
+            continue
+
+    return errors
 
 
 def _build_dependency_layers(tasks: list[dict]) -> list[list[dict]]:

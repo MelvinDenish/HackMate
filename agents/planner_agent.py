@@ -122,28 +122,12 @@ def run_planner(
     )
     content = response.content.strip()
 
-    # Parse JSON from response
-    try:
-        # Handle markdown code blocks
-        if "```" in content:
-            # Extract JSON from code block
-            parts = content.split("```")
-            for part in parts[1:]:
-                cleaned = part.strip()
-                if cleaned.startswith("json"):
-                    cleaned = cleaned[4:].strip()
-                try:
-                    tasks = json.loads(cleaned)
-                    if isinstance(tasks, list):
-                        break
-                except json.JSONDecodeError:
-                    continue
-            else:
-                tasks = json.loads(content)
-        else:
-            tasks = json.loads(content)
-    except json.JSONDecodeError as e:
-        logger.error(f"[Planner] Failed to parse task JSON: {e}")
+    # Parse JSON using robust multi-strategy parser (Pydantic schemas)
+    from pipeline.schemas import safe_parse_json, TaskSpec
+    tasks = safe_parse_json(content, schema_class=TaskSpec)
+
+    if tasks is None:
+        logger.error(f"[Planner] All JSON parse strategies failed")
         logger.error(f"[Planner] Raw response: {content[:500]}")
         # Attempt recovery: ask LLM to fix the JSON
         tasks = _recover_json(content, config)

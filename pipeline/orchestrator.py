@@ -30,6 +30,7 @@
 """
 
 import logging
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -52,6 +53,13 @@ from agents.security_agent import run_security_review
 from agents.deployer_agent import deploy_to_railway, generate_deploy_config
 from agents.pitch_agent import run_pitch
 from agents.presentation_agent import run_presentation
+
+# v3 Feature imports
+from design_systems import get_design_system
+from tools.dev_server import start_dev_server, stop_dev_server
+from tools.screenshots import capture_screenshots_sync
+from pipeline.learning_db import LearningDB
+from pipeline.progress_server import record_event as ws_event
 
 logger = logging.getLogger(__name__)
 
@@ -77,16 +85,22 @@ def build_pipeline(
     Returns:
         Compiled LangGraph StateGraph ready to invoke
     """
-    logger.info("[Orchestrator] Building pipeline graph v2")
+    logger.info("[Orchestrator] Building pipeline graph v3")
 
     def _notify(phase: str, status: str):
-        """Fire progress callback if registered."""
+        """Fire progress callback + WebSocket broadcast."""
+        cost = cost_tracker.total_cost if cost_tracker else 0.0
+        # Original callback
         if progress_callback:
             try:
-                cost = cost_tracker.total_cost if cost_tracker else 0.0
                 progress_callback(phase, status, cost)
             except Exception:
                 pass
+        # WebSocket broadcast (non-fatal)
+        try:
+            ws_event(phase, status, cost_usd=cost)
+        except Exception:
+            pass
 
     # ── Node Functions ────────────────────────────────────────
     # Each node receives PipelineState and returns updated state.
@@ -342,6 +356,26 @@ def build_pipeline(
                     )
                     code_files.extend(files)
 
+            # Inject design system CSS if not already present
+            try:
+                css_path = workspace.src_dir / "design-system.css"
+                if not css_path.exists():
+                    css_content = get_design_system("modern_dark")
+                    if css_content:
+                        workspace.write_source_file("design-system.css", css_content)
+                        code_files.append(str(css_path))
+                        logger.info("[Orchestrator] Injected design system CSS")
+            except Exception as e:
+                logger.warning(f"[Orchestrator] Design system injection failed (non-fatal): {e}")
+
+            # Start dev server for live preview (non-fatal)
+            try:
+                preview_url = start_dev_server(workspace.src_dir)
+                if preview_url:
+                    logger.info(f"[Orchestrator] 🌐 Live preview: {preview_url}")
+            except Exception as e:
+                logger.warning(f"[Orchestrator] Dev server start failed (non-fatal): {e}")
+
             status["coding"] = "completed"
             return {
                 "code_files": code_files,
@@ -472,6 +506,25 @@ def build_pipeline(
             )
 
             status["deployment"] = "completed"
+
+            # Capture screenshots of deployed app for pitch deck
+            try:
+                if deployment_url:
+                    screenshots_dir = workspace.output_dir / "screenshots"
+                    screenshots = capture_screenshots_sync(
+                        deployment_url, screenshots_dir,
+                        pages=["/", "/dashboard", "/api/health"],
+                    )
+                    logger.info(f"[Orchestrator] 📸 Captured {len(screenshots)} screenshots")
+            except Exception as e:
+                logger.warning(f"[Orchestrator] Screenshot capture failed (non-fatal): {e}")
+
+            # Stop dev server now that we have a real deployment
+            try:
+                stop_dev_server()
+            except Exception:
+                pass
+
             return {
                 "deployment_url": deployment_url,
                 "current_phase": "pitch",
@@ -689,10 +742,10 @@ def build_pipeline(
     graph.add_edge("pitch_node", "present_node")
     graph.add_edge("present_node", END)
 
-    logger.info("[Orchestrator] Pipeline graph v2.1 built successfully")
+    logger.info("[Orchestrator] Pipeline graph v3.0 built successfully")
     logger.info(
-        "[Orchestrator] Flow: research → architect → plan → code → "
-        "deslopify → review ↺ → security ↺ → deploy → pitch → present"
+        "[Orchestrator] Flow: research → architect → plan → code(+validate+design) → "
+        "deslopify → review ↺ → security ↺ → deploy(+screenshot) → pitch → present"
     )
 
     # Compile with SQLite checkpointing for resume-on-crash
@@ -729,8 +782,19 @@ def run_pipeline(
         Final pipeline state with all outputs
     """
     logger.info("╔══════════════════════════════════════════════╗")
-    logger.info("║  HACKATHON PIPELINE v2 — STARTING EXECUTION  ║")
+    logger.info("║  HACKATHON PIPELINE v3 — STARTING EXECUTION  ║")
     logger.info("╚══════════════════════════════════════════════╝")
+
+    run_start = time.time()
+
+    # Start WebSocket progress server (non-blocking, non-fatal)
+    try:
+        from pipeline.progress_server import start_server_background, start_tracking
+        start_tracking()
+        start_server_background(port=8765)
+        logger.info("[Orchestrator] 📊 Progress dashboard: http://localhost:8765")
+    except Exception as e:
+        logger.warning(f"[Orchestrator] Progress server failed (non-fatal): {e}")
 
     pipeline = build_pipeline(
         config, workspace, cost_tracker=cost_tracker,
@@ -748,6 +812,8 @@ def run_pipeline(
     except TypeError:
         # Fallback: checkpointing not available, run without config
         final_state = pipeline.invoke(initial_state)
+
+    run_duration = time.time() - run_start
 
     # Log completion
     logger.info("╔══════════════════════════════════════════════╗")
@@ -770,5 +836,32 @@ def run_pipeline(
             logger.info(f"\n{cost_tracker.format_summary()}")
         except Exception as e:
             logger.warning(f"[Orchestrator] Failed to save cost report: {e}")
+
+    # Record run in Learning DB (cross-run intelligence)
+    try:
+        learning_db = LearningDB()
+        review_passed_first = final_state.get("review_iteration", 0) == 0
+        learning_db.record_run(
+            problem_statement=initial_state.get("problem_statement", "")[:500],
+            tech_stack=initial_state.get("tech_stack", ""),
+            duration_seconds=run_duration,
+            total_cost_usd=cost_tracker.total_cost if cost_tracker else 0,
+            total_tasks=len(final_state.get("task_records", [])),
+            review_passed_first=review_passed_first,
+            review_iterations=final_state.get("review_iteration", 0),
+            security_verdict=final_state.get("security_verdict", ""),
+            deployment_success=bool(final_state.get("deployment_url")),
+            deployment_url=final_state.get("deployment_url", ""),
+        )
+        learning_db.close()
+        logger.info("[Orchestrator] 🧠 Run recorded in Learning DB")
+    except Exception as e:
+        logger.warning(f"[Orchestrator] Learning DB record failed (non-fatal): {e}")
+
+    # Cleanup dev server if still running
+    try:
+        stop_dev_server()
+    except Exception:
+        pass
 
     return final_state
