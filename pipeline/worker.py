@@ -158,6 +158,7 @@ class ArchitectWorker(BaseWorker):
 # ═══════════════════════════════════════════════════════════
 # PLANNER WORKER
 # Actual: run_planner(prd_path, workspace, config, cost_tracker=None)
+# RETURNS: tuple[str, list[dict]] = (task_file_path, validated_tasks)
 # ═══════════════════════════════════════════════════════════
 
 class PlannerWorker(BaseWorker):
@@ -171,7 +172,8 @@ class PlannerWorker(BaseWorker):
         traced_fn = trace_agent("planner", "planning")(run_planner)
 
         # Signature: run_planner(prd_path, workspace, config, cost_tracker=None)
-        tasks = await self._run_sync(
+        # RETURNS: tuple[str, list[dict]] — (task_file_path, validated_tasks)
+        planner_result = await self._run_sync(
             traced_fn,
             prd_path,                 # prd_path
             self.workspace,           # workspace
@@ -179,7 +181,18 @@ class PlannerWorker(BaseWorker):
             cost_tracker=self.cost_tracker,
         )
 
-        return {"tasks": tasks}
+        # Unpack: run_planner returns (task_file_path, task_list)
+        if isinstance(planner_result, tuple) and len(planner_result) == 2:
+            task_path, tasks = planner_result
+        elif isinstance(planner_result, list):
+            tasks = planner_result
+            task_path = ""
+        else:
+            tasks = []
+            task_path = ""
+            logger.warning(f"[Worker:planner] Unexpected return type: {type(planner_result)}")
+
+        return {"tasks": tasks, "task_path": task_path}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -469,16 +482,18 @@ class DeployWorker(BaseWorker):
             logger.warning(f"[Worker:deploy] Deploy config failed: {e}")
 
         # Step 5: Deploy to Railway
+        # RETURNS: str (the deployment URL, or "" on failure)
         if self.config.keys.railway:
             try:
                 from agents.deployer_agent import deploy_to_railway
                 # Signature: deploy_to_railway(workspace, config, project_name=None, cost_tracker=None)
-                deploy_result = await self._run_sync(
+                # Returns str (URL), NOT dict
+                deploy_url = await self._run_sync(
                     deploy_to_railway,
                     self.workspace,       # workspace
                     self.config,          # config
                 )
-                result["deploy_url"] = deploy_result.get("url", "")
+                result["deploy_url"] = deploy_url if isinstance(deploy_url, str) else ""
             except Exception as e:
                 logger.warning(f"[Worker:deploy] Railway failed: {e}")
         else:
