@@ -142,11 +142,13 @@ class ArchitectWorker(BaseWorker):
             cost_tracker=self.cost_tracker,
         )
 
-        # Approval gate (auto-approve in v6)
+        # Approval gate (auto-approve in v6 — mode='auto' is default)
+        # Actual: ApprovalGate(mode='auto', auto_timeout=60)
+        # Actual: request_approval(gate_name, summary, details='', options=None) -> str
         try:
             from pipeline.approval_gate import ApprovalGate
-            gate = ApprovalGate(timeout_seconds=1)
-            gate.request_approval("architecture", f"PRD: {prd_path}", auto_approve=True)
+            gate = ApprovalGate(mode="auto", auto_timeout=1)
+            gate.request_approval("architecture", f"PRD generated at {prd_path}")
         except Exception:
             pass
 

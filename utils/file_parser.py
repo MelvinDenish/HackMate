@@ -49,12 +49,19 @@ def parse_file_blocks(output: str) -> list[tuple[str, str]]:
             i += 1
             content_lines = []
             nest_depth = 0
+            hit_new_file = False
 
             while i < len(lines):
                 stripped = lines[i].strip()
 
+                # FIX: If this line starts a NEW file block, the current block
+                # is implicitly closed (LLM sometimes omits closing ```)
+                if _match_file_fence(lines[i]):
+                    hit_new_file = True
+                    break
+
                 # Track nested code fences (``` inside file content)
-                if stripped.startswith("```") and not _match_file_fence(lines[i]):
+                if stripped.startswith("```"):
                     if nest_depth > 0 and stripped == "```":
                         nest_depth -= 1
                     elif stripped != "```":
@@ -74,6 +81,11 @@ def parse_file_blocks(output: str) -> list[tuple[str, str]]:
                 if filepath.startswith("src/"):
                     filepath = filepath[4:]
                 parsed.append((filepath, content))
+
+            # If we broke because of a new file, DON'T increment i —
+            # the outer loop needs to process that line as the next file block
+            if hit_new_file:
+                continue
 
         i += 1
 
