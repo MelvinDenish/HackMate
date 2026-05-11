@@ -239,7 +239,7 @@ def build_pipeline(
             status["architecture"] = "failed"
             errors = list(state.get("errors", []))
             errors.append(f"Architecture: {str(e)}")
-            return {"phase_status": status, "errors": errors}
+            return {"phase_status": status, "errors": errors, "current_phase": "planning"}
 
     def plan_node(state: PipelineState) -> dict:
         """Phase 2b: Task Decomposition — Claude Sonnet 4"""
@@ -326,7 +326,7 @@ def build_pipeline(
             status["planning"] = "failed"
             errors = list(state.get("errors", []))
             errors.append(f"Planning: {str(e)}")
-            return {"phase_status": status, "errors": errors}
+            return {"phase_status": status, "errors": errors, "current_phase": "coding"}
 
     def code_node(state: PipelineState) -> dict:
         """Phase 3a: Code Synthesis — Claude Sonnet 4"""
@@ -467,7 +467,7 @@ def build_pipeline(
             status["coding"] = "failed"
             errors = list(state.get("errors", []))
             errors.append(f"Coding: {str(e)}")
-            return {"phase_status": status, "errors": errors}
+            return {"phase_status": status, "errors": errors, "current_phase": "deslopify"}
 
     def deslopify_node(state: PipelineState) -> dict:
         """Phase 3a.5: De-Sloppify Cleanup — Claude Haiku 3.5"""
@@ -772,7 +772,7 @@ def build_pipeline(
             status["pitch"] = "failed"
             errors = list(state.get("errors", []))
             errors.append(f"Pitch: {str(e)}")
-            return {"phase_status": status, "errors": errors}
+            return {"phase_status": status, "errors": errors, "current_phase": "presentation"}
 
     def present_node(state: PipelineState) -> dict:
         """Phase 4b: Presentation Rendering — Kimi k2 + Gamma API"""
@@ -803,7 +803,7 @@ def build_pipeline(
             status["presentation"] = "failed"
             errors = list(state.get("errors", []))
             errors.append(f"Presentation: {str(e)}")
-            return {"phase_status": status, "errors": errors}
+            return {"phase_status": status, "errors": errors, "current_phase": "completed"}
 
     # ── Routing Functions ─────────────────────────────────────
 

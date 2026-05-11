@@ -234,7 +234,8 @@ class CoderWorker(BaseWorker):
                 cost_tracker=self.cost_tracker,
             )
         else:
-            # Revision pass — re-execute each task with context
+            # Revision pass — re-execute ONLY tasks relevant to review feedback
+            # (ported from v5 orchestrator targeted retry logic)
             prd_content = ""
             if prd_path:
                 try:
@@ -244,7 +245,33 @@ class CoderWorker(BaseWorker):
             src_tree = self.workspace.get_src_tree()
             code_files = []
 
+            # Smart task targeting: only re-execute tasks whose files/title
+            # appear in the review fix_instructions (saves $1-2 per retry)
+            from pathlib import Path as _Path
+            tasks_to_fix = []
+            fix_text = revision_context.lower() if revision_context else ""
             for task in tasks:
+                task_files = task.get("files_created", [])
+                task_title = task.get("title", "").lower()
+                file_mentioned = any(
+                    _Path(f).name.lower() in fix_text
+                    for f in task_files if f
+                )
+                title_mentioned = task_title and task_title in fix_text
+                if file_mentioned or title_mentioned:
+                    tasks_to_fix.append(task)
+
+            # Fallback: if we couldn't match, re-do all incomplete
+            if not tasks_to_fix:
+                tasks_to_fix = [t for t in tasks if t.get("status") != "completed"]
+                if not tasks_to_fix:
+                    tasks_to_fix = tasks  # Last resort
+
+            logger.info(
+                f"[Worker:code] Revision: re-executing {len(tasks_to_fix)}/{len(tasks)} tasks"
+            )
+
+            for task in tasks_to_fix:
                 task["status"] = "pending"
                 # Signature: execute_task(task, prd_content, src_tree, workspace, config,
                 #                        revision_context, cost_tracker, all_tasks)
@@ -291,7 +318,7 @@ class CoderWorker(BaseWorker):
         """Inject CSS design system."""
         try:
             from design_systems import get_design_system
-            css = get_design_system("modern")
+            css = get_design_system("modern_dark")
             if css:
                 self.workspace.write_source_file("src/styles/design-system.css", css)
                 logger.info("[Worker:code] Design system CSS injected")
@@ -492,6 +519,7 @@ class DeployWorker(BaseWorker):
                     deploy_to_railway,
                     self.workspace,       # workspace
                     self.config,          # config
+                    cost_tracker=self.cost_tracker,
                 )
                 result["deploy_url"] = deploy_url if isinstance(deploy_url, str) else ""
             except Exception as e:
