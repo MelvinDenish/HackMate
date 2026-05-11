@@ -1,30 +1,34 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║  HACKATHON AUTOMATION PIPELINE v6 — CLI Entry Point          ║
+║  HACKATHON AUTOMATION PIPELINE v2 — CLI Entry Point          ║
 ║                                                              ║
 ║  Usage:                                                      ║
 ║    python main.py "Build an AI study buddy app"              ║
 ║    python main.py --skip-clarify "Build a fintech dashboard" ║
 ║    python main.py --budget 5.00 "Build a todo app"           ║
-║    python main.py --engine v6 "Build a real-time dashboard"  ║
-║    python main.py --engine v6 --adaptive "Complex SaaS app"  ║
 ║                                                              ║
-║  Engines:                                                    ║
-║  v5: LangGraph state machine (16 phases, hardcoded order)    ║
-║  v6: Meta-Agent + Workers (Architecture A+C)                 ║
-║      - Event-driven message bus                              ║
-║      - Fault-isolated async workers                          ║
-║      - Adaptive decision-making (--adaptive flag)            ║
-║      - Parallel coding, merged review+security               ║
+║  Improvements over v1:                                       ║
+║  ✅ Real-time cost tracking dashboard                        ║
+║  ✅ Budget limit enforcement                                 ║
+║  ✅ Enhanced phase status with new De-Sloppify + Security    ║
+║  ✅ Cost report display at completion                        ║
+║  ✅ Budget configurable via --budget flag or env var         ║
 ║                                                              ║
-║  Flow (v6):                                                  ║
-║  Meta-Agent dispatches → Research Worker → Architect Worker  ║
-║  → Planner Worker → Coder Worker(s) → Review Worker ↺       ║
-║  → Deploy Worker (deploy + pitch + present)                  ║
+║  Flow (v2):                                                  ║
+║  0. Clarification (interactive)                              ║
+║  1. Research → 2a. Architecture → 2b. Planning               ║
+║  3a. Coding → 3a.5. De-Sloppify → 3b. Review ↺              ║
+║  3c. Security → 3d. Deploy → 4a. Pitch → 4b. Presentation   ║
+║                                                              ║
+║  Multi-Provider LLM Architecture:                            ║
+║  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐       ║
+║  │  Anthropic   │  │    Google     │  │   Moonshot    │       ║
+║  │Claude Sonnet4│  │Gemini 2.5    │  │   Kimi k2     │       ║
+║  │Claude Haiku  │  │Flash / Pro   │  │  Multimodal   │       ║
+║  └──────────────┘  └──────────────┘  └───────────────┘       ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
-import asyncio
 import sys
 import logging
 import argparse
@@ -340,27 +344,6 @@ def main():
         default=None,
         help="Budget limit in USD (default: $10.00, or PIPELINE_BUDGET_LIMIT env var)",
     )
-    parser.add_argument(
-        "--engine",
-        choices=["v5", "v6"],
-        default="v6",
-        help="Pipeline engine: v5 (LangGraph) or v6 (Meta-Agent A+C, default)",
-    )
-    parser.add_argument(
-        "--adaptive",
-        action="store_true",
-        help="[v6 only] Let LLM decide which phases to skip (~$0.10 extra)",
-    )
-    parser.add_argument(
-        "--skip-research",
-        action="store_true",
-        help="[v6 only] Skip research phase for simple prompts",
-    )
-    parser.add_argument(
-        "--skip-deploy",
-        action="store_true",
-        help="[v6 only] Skip deployment phase",
-    )
 
     args = parser.parse_args()
     setup_logging(verbose=args.verbose)
@@ -424,75 +407,42 @@ def main():
     # Save refined brief to workspace
     workspace.write_file("briefs", "refined_brief.md", refined_brief)
 
-    # Run the pipeline
-    if args.engine == "v6":
-        # ── v6: Meta-Agent + Workers (Architecture A+C) ──
+    # Run the autonomous pipeline
+    console.print(Panel(
+        "[bold]Starting autonomous pipeline v4 execution...[/]\n"
+        "[dim]Flow: Research → Architect → Plan → Code → Polish → README → Self-Critique → Review ↺ → Security → Deploy → Pitch → Present[/]",
+        title="🤖 Autonomous Execution",
+        border_style="magenta",
+    ))
+
+    try:
+        final_state = run_pipeline(
+            initial_state, config, workspace,
+            cost_tracker=cost_tracker,
+        )
+
+        # Display results
+        display_results(final_state, cost_tracker)
+
+    except BudgetExceededError as e:
         console.print(Panel(
-            "[bold]Starting v6 Meta-Agent pipeline...[/]\n"
-            "[dim]Engine: Event-Driven Workers + Adaptive Meta-Agent[/]\n"
-            "[dim]Flow: Meta-Agent dispatches → Workers execute → Results aggregate[/]",
-            title="🤖 v6 Autonomous Execution (A+C)",
-            border_style="magenta",
+            f"[bold red]💸 BUDGET EXCEEDED[/]\n\n"
+            f"Spent: ${e.current:.4f}\n"
+            f"Limit: ${e.limit:.2f}\n\n"
+            "Pipeline stopped to prevent overspending.\n"
+            "Increase budget with --budget flag or PIPELINE_BUDGET_LIMIT env var.",
+            title="⚠️ Budget Guard",
+            border_style="red",
         ))
+        if cost_tracker.call_count > 0:
+            display_cost_report(cost_tracker)
+        sys.exit(1)
 
-        try:
-            final_state = asyncio.run(
-                _run_v6_pipeline(
-                    refined_brief, config, workspace, cost_tracker,
-                    adaptive=args.adaptive,
-                    skip_research=args.skip_research,
-                    skip_deploy=args.skip_deploy,
-                )
-            )
-            display_results(final_state, cost_tracker)
-
-        except BudgetExceededError as e:
-            console.print(Panel(
-                f"[bold red]💸 BUDGET EXCEEDED[/]\n\n"
-                f"Spent: ${e.current:.4f}\nLimit: ${e.limit:.2f}",
-                title="⚠️ Budget Guard", border_style="red",
-            ))
-            if cost_tracker.call_count > 0:
-                display_cost_report(cost_tracker)
-            sys.exit(1)
-
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Pipeline interrupted by user.[/]")
-            if cost_tracker.call_count > 0:
-                display_cost_report(cost_tracker)
-            sys.exit(0)
-
-    else:
-        # ── v5: LangGraph State Machine (legacy) ──
-        console.print(Panel(
-            "[bold]Starting v5 LangGraph pipeline...[/]\n"
-            "[dim]Flow: Research → Architect → Plan → Code → Polish → README → Self-Critique → Review ↺ → Security → Deploy → Pitch → Present[/]",
-            title="🤖 v5 Autonomous Execution (LangGraph)",
-            border_style="magenta",
-        ))
-
-        try:
-            final_state = run_pipeline(
-                initial_state, config, workspace,
-                cost_tracker=cost_tracker,
-            )
-            display_results(final_state, cost_tracker)
-
-        except BudgetExceededError as e:
-            console.print(Panel(
-                f"[bold red]💸 BUDGET EXCEEDED[/]\n\n"
-                f"Spent: ${e.current:.4f}\nLimit: ${e.limit:.2f}",
-                title="⚠️ Budget Guard", border_style="red",
-            ))
-            if cost_tracker.call_count > 0:
-                display_cost_report(cost_tracker)
-            sys.exit(1)
-
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Pipeline interrupted by user.[/]")
-            if cost_tracker.call_count > 0:
-                display_cost_report(cost_tracker)
-            sys.exit(0)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Pipeline interrupted by user.[/]")
+        if cost_tracker.call_count > 0:
+            display_cost_report(cost_tracker)
+        sys.exit(0)
 
     # Save cost report to workspace
     if cost_tracker.call_count > 0:
@@ -501,78 +451,6 @@ def main():
             console.print(f"\n[dim]Cost report saved to: {workspace.logs_dir / 'cost_report.json'}[/]")
         except Exception:
             pass
-
-
-async def _run_v6_pipeline(
-    brief: str,
-    config,
-    workspace: WorkspaceManager,
-    cost_tracker: CostTracker,
-    adaptive: bool = False,
-    skip_research: bool = False,
-    skip_deploy: bool = False,
-) -> dict:
-    """Run the v6 A+C pipeline: meta-agent + workers + message bus."""
-    from pipeline.message_bus import MessageBus
-    from pipeline.worker import create_worker_pool
-    from pipeline.meta_agent import MetaAgent
-
-    # Create the bus
-    bus = MessageBus()
-
-    # Create workers
-    workers = await create_worker_pool(
-        config, workspace, bus,
-        cost_tracker=cost_tracker,
-        coder_count=1,  # Scale up to 3 for parallel coding
-    )
-
-    # Start worker tasks
-    worker_tasks = [asyncio.create_task(w.run()) for w in workers]
-
-    # Create meta-agent
-    meta = MetaAgent(config, workspace, bus, cost_tracker)
-
-    try:
-        if adaptive:
-            result = await meta.run_adaptive(brief)
-        else:
-            result = await meta.run_deterministic(
-                brief,
-                skip_research=skip_research,
-                skip_deploy=skip_deploy,
-            )
-    finally:
-        # Stop all workers
-        for w in workers:
-            w.stop()
-        # Cancel worker tasks
-        for t in worker_tasks:
-            t.cancel()
-        # Wait for cancellation
-        await asyncio.gather(*worker_tasks, return_exceptions=True)
-
-    # Convert to display-compatible format
-    final_state = {
-        "refined_brief": brief,
-        "dossier_path": result.get("dossier_path", ""),
-        "prd_path": result.get("prd_path", ""),
-        "src_dir": result.get("src_dir", ""),
-        "code_files": result.get("code_files", []),
-        "deployment_url": result.get("deploy_url", ""),
-        "deck_url": result.get("deck_url", ""),
-        "pitch_content_path": result.get("pitch_path", ""),
-        "security_verdict": result.get("review_result", {}).get("security_verdict", ""),
-        "errors": result.get("errors", []),
-        "phase_status": {
-            phase: "completed" for phase in result.get("phases_completed", [])
-        },
-    }
-    # Add skipped phases
-    for phase in result.get("phases_skipped", []):
-        final_state["phase_status"][phase] = "skipped"
-
-    return final_state
 
 
 if __name__ == "__main__":
