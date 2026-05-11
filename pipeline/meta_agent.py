@@ -80,17 +80,30 @@ class MetaAgent:
             logger.debug(f"[MetaAgent] Learning DB unavailable: {e}")
 
     def _save_learning(self, results: dict):
-        """Save run results to learning DB for future improvement."""
+        """Save run results to learning DB for future improvement.
+
+        Actual signature: record_run(
+            problem_statement, problem_type='', tech_stack='',
+            duration_seconds=0, total_cost_usd=0, total_tasks=0,
+            review_passed_first=False, review_iterations=0,
+            security_verdict='', security_issues_count=0,
+            deployment_success=False, deployment_url=''
+        )
+        """
         if not self._learning_db:
             return
         try:
+            review = results.get("review_result", {})
             self._learning_db.record_run(
-                brief=results.get("brief", ""),
-                phases_completed=results.get("phases_completed", []),
-                review_iterations=results.get("review_iterations", 1),
-                total_cost=results.get("total_cost_usd", 0),
-                total_time=results.get("total_time_s", 0),
-                errors=results.get("errors", []),
+                problem_statement=results.get("brief", ""),
+                duration_seconds=results.get("total_time_s", 0),
+                total_cost_usd=results.get("total_cost_usd", 0),
+                total_tasks=len(results.get("tasks", [])),
+                review_passed_first=results.get("review_iterations", 1) == 1,
+                review_iterations=results.get("review_iterations", 0),
+                security_verdict=review.get("security_verdict", ""),
+                deployment_success=bool(results.get("deploy_url")),
+                deployment_url=results.get("deploy_url", ""),
             )
             logger.info("[MetaAgent] Run saved to learning DB")
         except Exception as e:
@@ -261,7 +274,10 @@ class MetaAgent:
             if not skip_deploy:
                 await self._notify_progress("deploy", "running")
                 logger.info("=== META: Dispatching Deploy + Pitch ===")
-                job_id = await self.bus.submit_job("deploy", {"prd_path": prd_path})
+                job_id = await self.bus.submit_job("deploy", {
+                    "prd_path": prd_path,
+                    "dossier_path": results.get("dossier_path", ""),
+                })
                 job = await self.bus.wait_for_result(job_id, timeout=300)
 
                 if job.status == JobStatus.DONE:
@@ -304,26 +320,45 @@ class MetaAgent:
         return results
 
     async def _run_tests(self, results: dict, prd_path: str):
-        """v5 FEATURE: Generate and run tests after coding."""
+        """v5 FEATURE: Generate and run tests after coding.
+
+        Actual signatures:
+        - generate_tests(workspace, config, tasks, prd_content, src_tree, cost_tracker=None)
+        - run_tests(workspace_src_dir, timeout=60)
+        """
         try:
             from agents.test_writer_agent import generate_tests, run_tests
 
             loop = asyncio.get_event_loop()
 
-            # Generate tests
+            # Gather context for test generation
+            prd_content = ""
+            if prd_path:
+                try:
+                    prd_content = self.workspace.read_file(prd_path)
+                except Exception:
+                    pass
+            src_tree = self.workspace.get_src_tree()
+            tasks = results.get("tasks", [])
+
+            # Signature: generate_tests(workspace, config, tasks, prd_content, src_tree, cost_tracker)
             test_files = await loop.run_in_executor(
                 None,
                 lambda: generate_tests(
-                    prd_path, self.workspace, self.config,
+                    self.workspace,       # workspace
+                    self.config,          # config
+                    tasks,                # tasks
+                    prd_content,          # prd_content
+                    src_tree,             # src_tree
                     cost_tracker=self.cost_tracker,
                 )
             )
 
             if test_files:
-                # Run tests
+                # Signature: run_tests(workspace_src_dir, timeout=60)
                 test_result = await loop.run_in_executor(
                     None,
-                    lambda: run_tests(self.workspace)
+                    lambda: run_tests(self.workspace.src_dir, timeout=60)
                 )
                 results["test_files"] = test_files
                 results["test_result"] = test_result
