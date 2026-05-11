@@ -329,7 +329,8 @@ class ReviewerWorker(BaseWorker):
         # Step 2: Code review
         traced_review = trace_agent("reviewer", "review")(run_review)
         # Signature: run_review(workspace, config, cost_tracker=None, prd_path="")
-        result = await self._run_sync(
+        # RETURNS: ReviewResult (NOT dict) — must convert via .to_dict()
+        review_result = await self._run_sync(
             traced_review,
             self.workspace,           # workspace
             self.config,              # config
@@ -337,17 +338,32 @@ class ReviewerWorker(BaseWorker):
             prd_path=prd_path,
         )
 
+        # Convert ReviewResult → dict (meta-agent checks result["verdict"])
+        if hasattr(review_result, "to_dict"):
+            result = review_result.to_dict()
+        elif isinstance(review_result, dict):
+            result = review_result
+        else:
+            result = {"verdict": "FAIL", "notes": str(review_result), "fix_instructions": ""}
+
         # Step 3: Security review
         try:
             from agents.security_agent import run_security_review
             traced_sec = trace_agent("security", "security")(run_security_review)
             # Signature: run_security_review(workspace, config, cost_tracker=None)
-            security = await self._run_sync(
+            # RETURNS: SecurityResult (NOT dict) — must convert via .to_dict()
+            security_obj = await self._run_sync(
                 traced_sec,
                 self.workspace,       # workspace
                 self.config,          # config
                 cost_tracker=self.cost_tracker,
             )
+            if hasattr(security_obj, "to_dict"):
+                security = security_obj.to_dict()
+            elif isinstance(security_obj, dict):
+                security = security_obj
+            else:
+                security = {"verdict": "SKIP"}
             result["security_verdict"] = security.get("verdict", "PASS")
             result["security_findings"] = security.get("findings", "")
         except ImportError:

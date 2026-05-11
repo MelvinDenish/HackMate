@@ -344,6 +344,27 @@ def main():
         default=None,
         help="Budget limit in USD (default: $10.00, or PIPELINE_BUDGET_LIMIT env var)",
     )
+    parser.add_argument(
+        "--engine",
+        choices=["v5", "v6"],
+        default="v5",
+        help="Pipeline engine: v5 (LangGraph, default) or v6 (async workers + meta-agent)",
+    )
+    parser.add_argument(
+        "--adaptive",
+        action="store_true",
+        help="[v6 only] Use LLM-driven adaptive mode (~$0.05 extra)",
+    )
+    parser.add_argument(
+        "--skip-research",
+        action="store_true",
+        help="Skip the research phase (saves ~$0.15)",
+    )
+    parser.add_argument(
+        "--skip-deploy",
+        action="store_true",
+        help="Skip deployment (use when no Railway key)",
+    )
 
     args = parser.parse_args()
     setup_logging(verbose=args.verbose)
@@ -408,41 +429,50 @@ def main():
     workspace.write_file("briefs", "refined_brief.md", refined_brief)
 
     # Run the autonomous pipeline
-    console.print(Panel(
-        "[bold]Starting autonomous pipeline v4 execution...[/]\n"
-        "[dim]Flow: Research → Architect → Plan → Code → Polish → README → Self-Critique → Review ↺ → Security → Deploy → Pitch → Present[/]",
-        title="🤖 Autonomous Execution",
-        border_style="magenta",
-    ))
-
-    try:
-        final_state = run_pipeline(
-            initial_state, config, workspace,
-            cost_tracker=cost_tracker,
-        )
-
-        # Display results
-        display_results(final_state, cost_tracker)
-
-    except BudgetExceededError as e:
+    if args.engine == "v6":
         console.print(Panel(
-            f"[bold red]💸 BUDGET EXCEEDED[/]\n\n"
-            f"Spent: ${e.current:.4f}\n"
-            f"Limit: ${e.limit:.2f}\n\n"
-            "Pipeline stopped to prevent overspending.\n"
-            "Increase budget with --budget flag or PIPELINE_BUDGET_LIMIT env var.",
-            title="⚠️ Budget Guard",
-            border_style="red",
+            "[bold]Starting v6 pipeline (async workers + meta-agent)...[/]\n"
+            "[dim]Flow: Research → Architect → Plan → Code ↔ Review → Deploy + Pitch[/]",
+            title="🤖 v6 Autonomous Execution",
+            border_style="magenta",
         ))
-        if cost_tracker.call_count > 0:
-            display_cost_report(cost_tracker)
-        sys.exit(1)
-
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Pipeline interrupted by user.[/]")
-        if cost_tracker.call_count > 0:
-            display_cost_report(cost_tracker)
-        sys.exit(0)
+        try:
+            final_state = _run_v6_pipeline(
+                refined_brief, config, workspace, cost_tracker,
+                adaptive=args.adaptive,
+                skip_research=args.skip_research,
+                skip_deploy=args.skip_deploy,
+            )
+            display_results(final_state, cost_tracker)
+        except BudgetExceededError as e:
+            _display_budget_error(e, cost_tracker)
+            sys.exit(1)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Pipeline interrupted by user.[/]")
+            if cost_tracker.call_count > 0:
+                display_cost_report(cost_tracker)
+            sys.exit(0)
+    else:
+        console.print(Panel(
+            "[bold]Starting autonomous pipeline v5 execution...[/]\n"
+            "[dim]Flow: Research → Architect → Plan → Code → Polish → README → Review ↺ → Security → Deploy → Pitch → Present[/]",
+            title="🤖 v5 Autonomous Execution",
+            border_style="magenta",
+        ))
+        try:
+            final_state = run_pipeline(
+                initial_state, config, workspace,
+                cost_tracker=cost_tracker,
+            )
+            display_results(final_state, cost_tracker)
+        except BudgetExceededError as e:
+            _display_budget_error(e, cost_tracker)
+            sys.exit(1)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Pipeline interrupted by user.[/]")
+            if cost_tracker.call_count > 0:
+                display_cost_report(cost_tracker)
+            sys.exit(0)
 
     # Save cost report to workspace
     if cost_tracker.call_count > 0:
@@ -451,6 +481,70 @@ def main():
             console.print(f"\n[dim]Cost report saved to: {workspace.logs_dir / 'cost_report.json'}[/]")
         except Exception:
             pass
+
+
+def _display_budget_error(e, cost_tracker):
+    """Display budget exceeded error."""
+    console.print(Panel(
+        f"[bold red]💸 BUDGET EXCEEDED[/]\n\n"
+        f"Spent: ${e.current:.4f}\n"
+        f"Limit: ${e.limit:.2f}\n\n"
+        "Pipeline stopped to prevent overspending.\n"
+        "Increase budget with --budget flag or PIPELINE_BUDGET_LIMIT env var.",
+        title="⚠️ Budget Guard",
+        border_style="red",
+    ))
+    if cost_tracker.call_count > 0:
+        display_cost_report(cost_tracker)
+
+
+def _run_v6_pipeline(
+    brief: str,
+    config,
+    workspace: WorkspaceManager,
+    cost_tracker: CostTracker,
+    adaptive: bool = False,
+    skip_research: bool = False,
+    skip_deploy: bool = False,
+) -> dict:
+    """Run the v6 async worker + meta-agent pipeline.
+
+    This is the Architecture A+C hybrid:
+    - Workers (Arch A) process jobs from typed queues
+    - MetaAgent (Arch C) orchestrates the flow
+    """
+    import asyncio
+    from pipeline.message_bus import MessageBus
+    from pipeline.worker import create_worker_pool
+    from pipeline.meta_agent import MetaAgent
+
+    async def _run():
+        bus = MessageBus()
+        meta = MetaAgent(config, workspace, bus, cost_tracker)
+
+        # Create and start all workers
+        workers = await create_worker_pool(config, workspace, bus, cost_tracker)
+        worker_tasks = [asyncio.create_task(w.run()) for w in workers]
+
+        try:
+            if adaptive:
+                result = await meta.run_adaptive(brief)
+            else:
+                result = await meta.run_deterministic(
+                    brief,
+                    skip_research=skip_research,
+                    skip_deploy=skip_deploy,
+                )
+            return result
+        finally:
+            # Graceful shutdown: stop all workers
+            for w in workers:
+                w.stop()
+            for t in worker_tasks:
+                t.cancel()
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+    return asyncio.run(_run())
 
 
 if __name__ == "__main__":
