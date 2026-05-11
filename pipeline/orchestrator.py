@@ -934,7 +934,12 @@ def build_pipeline(
             # v5 FIX: Redistribute budget savings after testing phase
             if cost_tracker:
                 try:
-                    cost_tracker.redistribute_savings(config.phase_budgets)
+                    testing_budget = config.phase_budgets.get("testing", 1.0)
+                    config.phase_budgets.update(
+                        cost_tracker.redistribute_savings(
+                            "testing", testing_budget, config.phase_budgets
+                        )
+                    )
                 except Exception:
                     pass
 
